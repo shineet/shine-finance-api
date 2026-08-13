@@ -35,3 +35,9 @@ create index if not exists plaid_transactions_account_idx on plaid_transactions 
 
 alter table plaid_items enable row level security;
 alter table plaid_transactions enable row level security;
+
+-- The project was created with "Automatically expose new tables" disabled, so
+-- new tables get no privileges granted to the Data API roles. RLS still blocks
+-- anon/authenticated; service_role bypasses RLS but still needs the grant.
+grant all on public.plaid_items to service_role;
+grant all on public.plaid_transactions to service_role;
