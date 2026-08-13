@@ -63,3 +63,15 @@ create index if not exists balance_snapshots_date_idx on balance_snapshots (as_o
 
 alter table balance_snapshots enable row level security;
 grant all on public.balance_snapshots to service_role;
+
+-- User-entered settings that should follow the person, not the device:
+-- manual card rates, the cash cushion, expected income, scheduled payments.
+-- Stored as JSON blobs keyed by name; the app owns their shape.
+create table if not exists user_prefs (
+  key        text primary key,
+  value      jsonb not null,
+  updated_at timestamptz not null default now()
+);
+
+alter table user_prefs enable row level security;
+grant all on public.user_prefs to service_role;
