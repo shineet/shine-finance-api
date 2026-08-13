@@ -102,6 +102,9 @@ export default async function handler(req, res) {
             access_token: item.access_token,
             cursor,
             count: 500,
+            // Recurring detection wants at least 180 days; ask for two years
+            // so income and bill patterns are visible from the first sync.
+            days_requested: 730,
           });
           for (const t of out.added || []) upserts.push(toRow(t, institution));
           for (const t of out.modified || []) upserts.push(toRow(t, institution));
