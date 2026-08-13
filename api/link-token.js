@@ -12,6 +12,16 @@ export default async function handler(req, res) {
   if (!authorize(req, res)) return;
 
   try {
+    // Without a completion_redirect_uri, Plaid ends on its own "all set"
+    // screen and the user simply switches back to the app, which finishes the
+    // exchange on becoming active. Only set one if a real https URL is
+    // configured -- pointing at an unregistered custom scheme would show a
+    // browser error after a link that actually succeeded.
+    const redirect = process.env.COMPLETION_REDIRECT_URI;
+    const hostedLink = redirect?.startsWith('https://')
+      ? { completion_redirect_uri: redirect }
+      : {};
+
     const out = await plaid('/link/token/create', {
       client_name: 'MyFinance',
       language: 'en',
@@ -20,10 +30,7 @@ export default async function handler(req, res) {
       // and keeps re-links mapping to the same Plaid user.
       user: { client_user_id: 'shine' },
       products: ['transactions'],
-      hosted_link: {
-        // Bounce back into the native app when Link finishes.
-        completion_redirect_uri: process.env.COMPLETION_REDIRECT_URI || 'myfinance://link-complete',
-      },
+      hosted_link: hostedLink,
     });
 
     return res.status(200).json({
