@@ -18,21 +18,27 @@ export default async function handler(req, res) {
   try {
     const session = await plaid('/link/token/get', { link_token });
 
-    // link_sessions is newest-last; a session only has results once the user
-    // actually finished. Anything else means they bailed or are mid-flow.
+    // A session only carries a public token once the user actually finished.
+    // Plaid exposes it at two paths: results.item_add_results[] is the current
+    // structure but requires an account migration to populate, so by default
+    // only the deprecated on_success.public_token is set. Read both, dedupe.
     const sessions = session.link_sessions || [];
-    const results = sessions
-      .flatMap((s) => s.results?.item_add_results || [])
-      .filter((r) => r.public_token);
+    const tokens = new Set();
+    for (const s of sessions) {
+      for (const r of s.results?.item_add_results || []) {
+        if (r.public_token) tokens.add(r.public_token);
+      }
+      if (s.on_success?.public_token) tokens.add(s.on_success.public_token);
+    }
 
-    if (!results.length) {
+    if (!tokens.size) {
       return res.status(409).json({ error: 'Link not completed yet', linked: 0 });
     }
 
     const linked = [];
-    for (const result of results) {
+    for (const publicToken of tokens) {
       const exchanged = await plaid('/item/public_token/exchange', {
-        public_token: result.public_token,
+        public_token: publicToken,
       });
 
       // Institution name is only for display in the app's account list.
