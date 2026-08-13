@@ -29,10 +29,13 @@ export default async function handler(req, res) {
       // Stable per-user id. One human uses this backend, so a constant is fine
       // and keeps re-links mapping to the same Plaid user.
       user: { client_user_id: 'shine' },
+      products: ['transactions'],
       // liabilities supplies APR, minimum payment, due dates and statement
-      // balances for credit accounts -- the inputs payoff projection needs.
-      // Products are fixed at link time, so adding one means re-linking.
-      products: ['transactions', 'liabilities'],
+      // balances -- the inputs payoff projection needs. It MUST be optional,
+      // not required: as a required product Plaid rejects any institution
+      // with no credit account ("No liability accounts"), which blocks
+      // linking a checking-only bank entirely.
+      optional_products: ['liabilities'],
       hosted_link: hostedLink,
     });
 
