@@ -1,0 +1,6 @@
+{
+  "name": "shine-finance-api",
+  "private": true,
+  "type": "module",
+  "description": "Plaid backend for the MyFinance iOS/macOS app"
+}
