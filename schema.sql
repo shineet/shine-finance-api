@@ -41,3 +41,25 @@ alter table plaid_transactions enable row level security;
 -- anon/authenticated; service_role bypasses RLS but still needs the grant.
 grant all on public.plaid_items to service_role;
 grant all on public.plaid_transactions to service_role;
+
+-- Daily balance snapshots. Plaid only ever reports "now", so progress over
+-- time has to be recorded as it happens -- there is no way to backfill it
+-- later. One row per account per day; re-running on the same day overwrites.
+create table if not exists balance_snapshots (
+  account_id   text not null,
+  as_of        date not null,
+  institution  text,
+  name         text,
+  type         text,
+  subtype      text,
+  current      numeric(14,2),
+  available    numeric(14,2),
+  "limit"      numeric(14,2),
+  created_at   timestamptz not null default now(),
+  primary key (account_id, as_of)
+);
+
+create index if not exists balance_snapshots_date_idx on balance_snapshots (as_of desc);
+
+alter table balance_snapshots enable row level security;
+grant all on public.balance_snapshots to service_role;
