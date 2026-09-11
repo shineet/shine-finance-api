@@ -13,9 +13,15 @@ const sbHeaders = () => ({
   Authorization: `Bearer ${process.env.SUPABASE_SECRET_KEY}`,
 });
 
-async function forget(itemId, accountIds) {
+async function forget(itemId, accountIds, keepTransactions) {
   // Transactions reference accounts, not items, so clear them by account id.
-  if (accountIds.length) {
+  //
+  // Unless we are keeping them. A connection that Plaid cannot repair is a
+  // reason to remove the connection, not a reason to lose years of spending
+  // history: the rows stay, keyed by account ids that no longer resolve to a
+  // live account, and the Transactions list still shows them because it reads
+  // by date rather than by account.
+  if (accountIds.length && !keepTransactions) {
     const list = accountIds.map(encodeURIComponent).join(',');
     await fetch(
       `${process.env.SUPABASE_URL}/rest/v1/plaid_transactions?account_id=in.(${list})`,
@@ -32,7 +38,9 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   if (!authorize(req, res)) return;
 
-  const { item_id, all } = req.body || {};
+  // keep_transactions defaults to FALSE, which is the old behaviour, so no
+  // existing caller changes meaning by accident. The app asks explicitly.
+  const { item_id, all, keep_transactions } = req.body || {};
   if (!item_id && !all) return res.status(400).json({ error: 'item_id or all required' });
 
   try {
@@ -63,11 +71,16 @@ export default async function handler(req, res) {
         errors.push({ institution, error: err.message, code: err.plaidCode });
       }
 
-      await forget(item.item_id, accountIds);
+      await forget(item.item_id, accountIds, !!keep_transactions);
       removed.push(institution);
     }
 
-    return res.status(200).json({ removed: removed.length, institutions: removed, errors });
+    return res.status(200).json({
+      removed: removed.length,
+      institutions: removed,
+      keptTransactions: !!keep_transactions,
+      errors,
+    });
   } catch (err) {
     return res.status(err.status || 500).json({ error: err.message, code: err.plaidCode });
   }
