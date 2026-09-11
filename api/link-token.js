@@ -35,6 +35,12 @@ export default async function handler(req, res) {
     // broken Item, the other creates a second one beside it. When a reconnect
     // "did not work", the first thing worth knowing is which of the two ran.
     console.log('link-token:', item_id ? `UPDATE mode for ${item_id}` : 'NEW link');
+    // The completion redirect is the likeliest thing to break a session AFTER
+    // the bank has authorised: Plaid rejects a redirect URI that is not
+    // registered in the dashboard, and the failure surfaces as Link's generic
+    // "Something went wrong" with nothing said about why.
+    console.log('link-token: completion redirect =',
+                process.env.COMPLETION_REDIRECT_URI || '(none set)');
 
     // Without a completion_redirect_uri, Plaid ends on its own "all set"
     // screen and the user simply switches back to the app, which finishes the
