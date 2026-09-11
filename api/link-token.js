@@ -5,13 +5,32 @@
 // browser (Safari on iOS, default browser on macOS), the user authenticates
 // with their bank, and Plaid redirects back to the app's custom scheme.
 
-import { plaid, authorize } from '../lib/plaid.js';
+import { plaid, authorize, listItems } from '../lib/plaid.js';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   if (!authorize(req, res)) return;
 
   try {
+    // UPDATE MODE: repairing one bank rather than adding another.
+    //
+    // When a login expires, Plaid stops returning that institution's accounts
+    // entirely -- which is how Chase hid two pay cycles. The obvious remedy,
+    // remove it and link it again, is the wrong one: it drops the Item and
+    // every transaction filed under its accounts, so the history goes with it.
+    //
+    // Passing the existing access_token opens Link on that bank's own login,
+    // fixes the Item in place, and keeps the id, the accounts and the
+    // transactions exactly as they were.
+    const { item_id } = req.body || {};
+    let updateFor = {};
+    if (item_id) {
+      const items = await listItems();
+      const target = items.find((i) => i.item_id === item_id);
+      if (!target) return res.status(404).json({ error: 'No such connection' });
+      updateFor = { access_token: target.access_token };
+    }
+
     // Without a completion_redirect_uri, Plaid ends on its own "all set"
     // screen and the user simply switches back to the app, which finishes the
     // exchange on becoming active. Only set one if a real https URL is
@@ -29,14 +48,17 @@ export default async function handler(req, res) {
       // Stable per-user id. One human uses this backend, so a constant is fine
       // and keeps re-links mapping to the same Plaid user.
       user: { client_user_id: 'shine' },
-      products: ['transactions'],
       // liabilities supplies APR, minimum payment, due dates and statement
       // balances -- the inputs payoff projection needs. It MUST be optional,
       // not required: as a required product Plaid rejects any institution
       // with no credit account ("No liability accounts"), which blocks
       // linking a checking-only bank entirely.
-      optional_products: ['liabilities'],
+      // Both are omitted in update mode: Plaid rejects a product list when
+      // repairing an existing Item, since it already knows what it was
+      // authorised for.
+      ...(item_id ? {} : { products: ['transactions'], optional_products: ['liabilities'] }),
       hosted_link: hostedLink,
+      ...updateFor,
     });
 
     return res.status(200).json({

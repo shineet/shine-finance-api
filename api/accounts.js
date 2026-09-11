@@ -62,6 +62,9 @@ export default async function handler(req, res) {
               type: acct.type,
               subtype: acct.subtype,
               institution: item.institution_name || out.item?.institution_id || null,
+              // Which connection this came from, so the app can offer to
+              // repair or remove ONE bank instead of all of them.
+              item_id: item.item_id,
               available: acct.balances?.available ?? null,
               current: acct.balances?.current ?? null,
               limit: acct.balances?.limit ?? null,
@@ -71,6 +74,7 @@ export default async function handler(req, res) {
         } catch (err) {
           errors.push({
             institution: item.institution_name || item.item_id,
+            item_id: item.item_id,
             error: err.message,
             code: err.plaidCode,
           });
