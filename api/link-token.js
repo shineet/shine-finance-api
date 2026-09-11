@@ -30,6 +30,11 @@ export default async function handler(req, res) {
       if (!target) return res.status(404).json({ error: 'No such connection' });
       updateFor = { access_token: target.access_token };
     }
+    // Which mode this is, named in the log. Update mode and a fresh link look
+    // identical from outside and behave completely differently: one repairs a
+    // broken Item, the other creates a second one beside it. When a reconnect
+    // "did not work", the first thing worth knowing is which of the two ran.
+    console.log('link-token:', item_id ? `UPDATE mode for ${item_id}` : 'NEW link');
 
     // Without a completion_redirect_uri, Plaid ends on its own "all set"
     // screen and the user simply switches back to the app, which finishes the
@@ -61,12 +66,14 @@ export default async function handler(req, res) {
       ...updateFor,
     });
 
+    console.log('link-token: created ok');
     return res.status(200).json({
       link_token: out.link_token,
       hosted_link_url: out.hosted_link_url,
       expiration: out.expiration,
     });
   } catch (err) {
+    console.error('link-token failed:', err.plaidCode || '(no code)', err.message);
     return res.status(err.status || 500).json({ error: err.message, code: err.plaidCode });
   }
 }
