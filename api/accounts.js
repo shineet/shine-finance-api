@@ -72,6 +72,12 @@ export default async function handler(req, res) {
             });
           }
         } catch (err) {
+          // LOGGED, not only collected. The list is returned to the app and
+          // shown as "not refreshing", which says that something is wrong and
+          // never what. Chase failed for days and the only way to learn the
+          // actual Plaid code was to add this line after the fact.
+          console.error('Institution failed:', item.institution_name || item.item_id,
+                        err.plaidCode || '(no code)', err.message);
           errors.push({
             institution: item.institution_name || item.item_id,
             item_id: item.item_id,
