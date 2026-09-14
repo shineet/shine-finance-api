@@ -13,15 +13,21 @@ const sbHeaders = () => ({
   Authorization: `Bearer ${process.env.SUPABASE_SECRET_KEY}`,
 });
 
-async function forget(itemId, accountIds, keepTransactions) {
-  // Transactions reference accounts, not items, so clear them by account id.
+async function forget(itemId, accountIds, deleteTransactions) {
+  // Transactions reference accounts, not items, so clearing them means going
+  // by account id.
   //
-  // Unless we are keeping them. A connection that Plaid cannot repair is a
-  // reason to remove the connection, not a reason to lose years of spending
-  // history: the rows stay, keyed by account ids that no longer resolve to a
-  // live account, and the Transactions list still shows them because it reads
-  // by date rather than by account.
-  if (accountIds.length && !keepTransactions) {
+  // But by DEFAULT nothing is cleared. A bank that has stopped talking is a
+  // reason to remove a connection; it is never a reason to lose years of
+  // recorded spending. The rows stay, keyed by account ids that no longer
+  // resolve to a live account, and the Transactions list still shows them
+  // because it reads by date rather than by account.
+  //
+  // This used to default the other way, and it cost a real Chase history: the
+  // connection broke, removing it was the only remedy on offer, and removing
+  // it took everything Chase had ever recorded. Deleting is now something that
+  // has to be asked for in as many words.
+  if (accountIds.length && deleteTransactions) {
     const list = accountIds.map(encodeURIComponent).join(',');
     await fetch(
       `${process.env.SUPABASE_URL}/rest/v1/plaid_transactions?account_id=in.(${list})`,
@@ -38,9 +44,13 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   if (!authorize(req, res)) return;
 
-  // keep_transactions defaults to FALSE, which is the old behaviour, so no
-  // existing caller changes meaning by accident. The app asks explicitly.
-  const { item_id, all, keep_transactions } = req.body || {};
+  // Deletion is opt-in and explicit. Anything else -- a missing field, an old
+  // build, a caller that has not thought about it -- keeps the history, which
+  // is the direction a mistake should fail in. An older app sending
+  // keep_transactions:false now keeps rather than erases, deliberately: that
+  // flag was the one that lost the Chase history.
+  const { item_id, all, delete_transactions } = req.body || {};
+  const deleteTransactions = delete_transactions === true;
   if (!item_id && !all) return res.status(400).json({ error: 'item_id or all required' });
 
   try {
@@ -71,14 +81,18 @@ export default async function handler(req, res) {
         errors.push({ institution, error: err.message, code: err.plaidCode });
       }
 
-      await forget(item.item_id, accountIds, !!keep_transactions);
+      await forget(item.item_id, accountIds, deleteTransactions);
+      console.log(
+        `[unlink] ${institution}: connection removed, ` +
+        `${deleteTransactions ? `${accountIds.length} account(s) of transactions DELETED` : 'history kept'}`
+      );
       removed.push(institution);
     }
 
     return res.status(200).json({
       removed: removed.length,
       institutions: removed,
-      keptTransactions: !!keep_transactions,
+      keptTransactions: !deleteTransactions,
       errors,
     });
   } catch (err) {
