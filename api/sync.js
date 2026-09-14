@@ -202,6 +202,33 @@ export default async function handler(req, res) {
         const base =
           `${process.env.SUPABASE_URL}/rest/v1/plaid_transactions` +
           `?select=date&institution=eq.${encodeURIComponent(name)}`;
+        // Which DAYS have nothing.
+        //
+        // The monthly counts came back healthy -- Chase had 273 rows in August
+        // -- while a specific deposit on 21 August was still missing. A month
+        // that looks normal can still be missing one day, and one day is what a
+        // fortnightly salary lives on. So: the recent window, day by day, with
+        // the empty ones named.
+        try {
+          const since = new Date(Date.now() - 45 * 86400000).toISOString().slice(0, 10);
+          const recent = await fetch(
+            `${base}&date=gte.${since}&order=date.desc&limit=1000`,
+            { headers: sbHeaders() }
+          ).then((r) => r.json());
+          const days = new Set((recent || []).map((r) => String(r.date || '')));
+          const empty = [];
+          for (let i = 0; i < 45; i += 1) {
+            const d = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+            if (!days.has(d)) empty.push(d.slice(5));
+          }
+          console.log(
+            `[gap] ${name}: ${days.size} day(s) with activity since ${since}; ` +
+            `nothing on ${empty.join(' ') || 'every day covered'}`
+          );
+        } catch (e) {
+          console.error(`[gap] ${name}: ${e.message}`);
+        }
+
         // Every date this institution holds, counted per month.
         //
         // A first and last date cannot show a hole, and a hole in the middle is
