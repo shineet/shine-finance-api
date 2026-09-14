@@ -81,18 +81,48 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   if (!authorize(req, res)) return;
 
+  // A full rebuild: ask Plaid to re-pull each Item, then replay its entire
+  // history from the beginning instead of from the saved cursor.
+  //
+  // Safe to run at any time. Upserts merge on transaction_id, so replaying a
+  // window that is already stored rewrites the same rows rather than doubling
+  // them. That is what makes this usable as a repair rather than a gamble.
+  //
+  // It exists because a delta feed cannot heal a hole. When an Item's login
+  // expires, Plaid stops collecting for it, and repairing the connection
+  // resumes from the repair date -- it does not go back and fill the outage.
+  // The cursor then carries on quite happily from the far side of a gap that
+  // nothing will ever mention again.
+  const full = req.query.full === '1';
+
   try {
     const items = await listItems();
     const errors = [];
     let addedCount = 0;
     let removedCount = 0;
 
+    if (full) {
+      console.log(`[sync] FULL rebuild requested for ${items.length} item(s)`);
+      for (const item of items) {
+        const institution = item.institution_name || item.item_id;
+        try {
+          // Ask the bank for anything it has not handed over yet. Rate-limited
+          // by Plaid and allowed to fail: the replay below is the part that
+          // matters, and a refused refresh must not stop it.
+          await plaid('/transactions/refresh', { access_token: item.access_token });
+          console.log(`[sync] ${institution}: refresh requested`);
+        } catch (err) {
+          console.log(`[sync] ${institution}: refresh declined (${err.message})`);
+        }
+      }
+    }
+
     // Sequential across items: keeps Supabase writes predictable and avoids
     // hammering Plaid when several institutions each paginate.
     for (const item of items) {
       const institution = item.institution_name || item.item_id;
       try {
-        let cursor = item.cursor || undefined;
+        let cursor = full ? undefined : (item.cursor || undefined);
         let hasMore = true;
         let pages = 0;
         const upserts = [];
@@ -102,7 +132,10 @@ export default async function handler(req, res) {
         // stop the others -- and for a month nothing anywhere read that array.
         // The store simply stopped receiving new transactions and every screen
         // reported zero as though zero were the answer.
-        console.log(`[sync] ${institution}: starting, cursor=${cursor ? 'yes' : 'none'}`);
+        console.log(
+          `[sync] ${institution}: starting, cursor=${cursor ? 'yes' : 'none'}` +
+          (full ? ' (full rebuild)' : '')
+        );
 
         while (hasMore) {
           const out = await plaid('/transactions/sync', {
