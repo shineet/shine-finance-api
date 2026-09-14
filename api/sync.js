@@ -155,6 +155,37 @@ export default async function handler(req, res) {
       `${removedCount} removed, ${errors.length} failed`
     );
 
+    // What the store actually HOLDS, per institution. Counts and dates only --
+    // no descriptions, no amounts.
+    //
+    // Worth its own queries because "the sync succeeded" and "the data is
+    // there" are different claims, and only the second one matters. A bank
+    // whose newest row is weeks old, or whose oldest row starts after the
+    // history should, is invisible from the app: a missing transaction has no
+    // row to be missing from.
+    try {
+      const names = [...new Set(items.map((i) => i.institution_name || i.item_id))];
+      for (const name of names) {
+        const base =
+          `${process.env.SUPABASE_URL}/rest/v1/plaid_transactions` +
+          `?select=date&institution=eq.${encodeURIComponent(name)}`;
+        const [newest, oldest, counted] = await Promise.all([
+          fetch(`${base}&order=date.desc&limit=1`, { headers: sbHeaders() }).then((r) => r.json()),
+          fetch(`${base}&order=date.asc&limit=1`, { headers: sbHeaders() }).then((r) => r.json()),
+          fetch(`${base}&limit=1`, {
+            headers: { ...sbHeaders(), Prefer: 'count=exact', Range: '0-0' },
+          }).then((r) => r.headers.get('content-range')),
+        ]);
+        const total = (counted || '').split('/')[1] || '?';
+        console.log(
+          `[store] ${name}: ${total} row(s), ` +
+          `${oldest?.[0]?.date || 'none'} -> ${newest?.[0]?.date || 'none'}`
+        );
+      }
+    } catch (e) {
+      console.error(`[store] could not summarise: ${e.message}`);
+    }
+
     return res.status(200).json({
       synced: addedCount,
       removed: removedCount,
