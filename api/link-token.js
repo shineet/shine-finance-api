@@ -68,6 +68,12 @@ export default async function handler(req, res) {
       // repairing an existing Item, since it already knows what it was
       // authorised for.
       ...(item_id ? {} : { products: ['transactions'], optional_products: ['liabilities'] }),
+      // How much history a NEW Item starts with. This is where days_requested
+      // actually belongs; it was on /transactions/sync, which rejects it.
+      // Recurring detection needs at least 180 days to be reliable, so ask for
+      // two years and let income and bill patterns be visible from day one.
+      // Omitted in update mode, along with the product list.
+      ...(item_id ? {} : { transactions: { days_requested: 730 } }),
       hosted_link: hostedLink,
       ...updateFor,
     });

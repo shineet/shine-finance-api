@@ -109,9 +109,13 @@ export default async function handler(req, res) {
             access_token: item.access_token,
             cursor,
             count: 500,
-            // Recurring detection wants at least 180 days; ask for two years
-            // so income and bill patterns are visible from the first sync.
-            days_requested: 730,
+            // NO days_requested here. Plaid rejects it on this endpoint --
+            // "the following fields are not recognized by this endpoint" --
+            // and rejects the whole call, so every sync for every institution
+            // failed from the moment it was added. It belongs on
+            // /link/token/create, where it sets how much history a NEW Item
+            // starts with; /transactions/sync is a delta feed and has no
+            // window to ask for. The window is a property of the Item.
           });
           for (const t of out.added || []) upserts.push(toRow(t, institution));
           for (const t of out.modified || []) upserts.push(toRow(t, institution));
