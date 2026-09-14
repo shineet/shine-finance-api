@@ -94,8 +94,15 @@ export default async function handler(req, res) {
       try {
         let cursor = item.cursor || undefined;
         let hasMore = true;
+        let pages = 0;
         const upserts = [];
         const deletes = [];
+        // Logged because the alternative was guessing. This endpoint answers
+        // 200 with a per-institution errors array -- one bank refusing must not
+        // stop the others -- and for a month nothing anywhere read that array.
+        // The store simply stopped receiving new transactions and every screen
+        // reported zero as though zero were the answer.
+        console.log(`[sync] ${institution}: starting, cursor=${cursor ? 'yes' : 'none'}`);
 
         while (hasMore) {
           const out = await plaid('/transactions/sync', {
@@ -111,6 +118,12 @@ export default async function handler(req, res) {
           for (const r of out.removed || []) deletes.push(r.transaction_id);
           cursor = out.next_cursor;
           hasMore = out.has_more;
+          pages += 1;
+          // A cursor that never advances is the failure that looks like
+          // success: every call returns nothing, forever, and says nothing.
+          if (pages > 50) {
+            throw new Error('stopped after 50 pages -- cursor may not be advancing');
+          }
         }
 
         // Persist rows before the cursor: if the write fails, the next run
@@ -121,10 +134,22 @@ export default async function handler(req, res) {
 
         addedCount += upserts.length;
         removedCount += deletes.length;
+        console.log(
+          `[sync] ${institution}: ${upserts.length} upserted, ${deletes.length} removed, ` +
+          `${pages} page(s), cursor ${cursor ? 'saved' : 'MISSING'}`
+        );
       } catch (err) {
+        // Loudly. A caught error that is only returned in a body nobody reads
+        // is indistinguishable from no error at all.
+        console.error(`[sync] ${institution} FAILED: ${err.message}`, err.plaidCode || '');
         errors.push({ institution, error: err.message, code: err.plaidCode });
       }
     }
+
+    console.log(
+      `[sync] done: ${items.length} item(s), ${addedCount} upserted, ` +
+      `${removedCount} removed, ${errors.length} failed`
+    );
 
     return res.status(200).json({
       synced: addedCount,
