@@ -90,7 +90,53 @@ export default async function handler(req, res) {
 
     await snapshot(accounts);
 
-    return res.status(200).json({ accounts, errors, as_of: new Date().toISOString() });
+    // Accounts that used to exist and no longer do.
+    //
+    // Re-linking a bank issues NEW Plaid account ids for the same real
+    // accounts, so every transaction recorded before the re-link is filed under
+    // an id that now resolves to nothing. Anything that works by asking "is
+    // this a cash account?" answers no, and the whole of that account's history
+    // silently stops counting -- present in the transactions list, absent from
+    // every total. That is how a payroll deposit in July can be visible on one
+    // screen and missing from income on another.
+    //
+    // The balance snapshots know what those accounts were, because they were
+    // written while the accounts were still live. Returning them lets the app
+    // classify old transactions instead of discarding them. They carry no
+    // balance: they are for identification only, and must never be added to a
+    // total of what exists now.
+    let retired = [];
+    try {
+      const rows = await fetch(
+        `${process.env.SUPABASE_URL}/rest/v1/balance_snapshots` +
+        `?select=account_id,name,institution,type,subtype,as_of&order=as_of.desc&limit=1000`,
+        { headers: sbHeaders() }
+      ).then((r) => r.json());
+      const live = new Set(accounts.map((a) => a.account_id));
+      const seen = new Set();
+      for (const row of rows || []) {
+        if (live.has(row.account_id) || seen.has(row.account_id)) continue;
+        seen.add(row.account_id);
+        retired.push({
+          account_id: row.account_id,
+          name: row.name,
+          institution: row.institution,
+          type: row.type,
+          subtype: row.subtype,
+          last_seen: row.as_of,
+        });
+      }
+      if (retired.length) {
+        console.log(
+          `[accounts] ${retired.length} retired account(s): ` +
+          retired.map((r) => `${r.institution}/${r.type} last seen ${r.last_seen}`).join(', ')
+        );
+      }
+    } catch (err) {
+      console.error('retired lookup failed:', err.message);
+    }
+
+    return res.status(200).json({ accounts, retired, errors, as_of: new Date().toISOString() });
   } catch (err) {
     return res.status(err.status || 500).json({ error: err.message, code: err.plaidCode });
   }
