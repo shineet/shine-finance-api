@@ -253,6 +253,32 @@ export default async function handler(req, res) {
       console.error(`[store] could not summarise: ${e.message}`);
     }
 
+    // The last question worth asking about the missing 21 August deposit.
+    //
+    // 21 August is not an empty day: both banks recorded transactions on it.
+    // So either the store holds that deposit and the app is not showing it, or
+    // Plaid never recorded it and no amount of replaying will conjure it. Those
+    // need completely different answers and cannot be told apart from outside.
+    //
+    // Dates and institutions only. No amounts.
+    try {
+      const probe = String(req.query.probe || 'infosys').slice(0, 40);
+      const url =
+        `${process.env.SUPABASE_URL}/rest/v1/plaid_transactions` +
+        `?select=date,institution,account_id,name&name=ilike.*${encodeURIComponent(probe)}*` +
+        `&date=gte.2026-07-01&order=date.desc&limit=60`;
+      const hits = await fetch(url, { headers: sbHeaders() }).then((r) => r.json());
+      console.log(`[probe] "${probe}" since 2026-07-01: ${(hits || []).length} row(s)`);
+      for (const h of hits || []) {
+        console.log(
+          `[probe]   ${h.date}  ${h.institution}  acct=${String(h.account_id).slice(-6)}  ` +
+          `${String(h.name).slice(0, 48)}`
+        );
+      }
+    } catch (e) {
+      console.error(`[probe] failed: ${e.message}`);
+    }
+
     return res.status(200).json({
       synced: addedCount,
       removed: removedCount,
