@@ -202,17 +202,24 @@ export default async function handler(req, res) {
         const base =
           `${process.env.SUPABASE_URL}/rest/v1/plaid_transactions` +
           `?select=date&institution=eq.${encodeURIComponent(name)}`;
-        const [newest, oldest, counted] = await Promise.all([
-          fetch(`${base}&order=date.desc&limit=1`, { headers: sbHeaders() }).then((r) => r.json()),
-          fetch(`${base}&order=date.asc&limit=1`, { headers: sbHeaders() }).then((r) => r.json()),
-          fetch(`${base}&limit=1`, {
-            headers: { ...sbHeaders(), Prefer: 'count=exact', Range: '0-0' },
-          }).then((r) => r.headers.get('content-range')),
-        ]);
-        const total = (counted || '').split('/')[1] || '?';
+        // Every date this institution holds, counted per month.
+        //
+        // A first and last date cannot show a hole, and a hole in the middle is
+        // exactly what a broken-then-repaired connection leaves behind: Plaid
+        // stops collecting during the outage and resumes at the repair, so the
+        // range still looks complete from both ends. A month with a suspiciously
+        // small count, between two normal ones, is the whole diagnosis.
+        const rows = await fetch(`${base}&order=date.desc&limit=5000`, {
+          headers: sbHeaders(),
+        }).then((r) => r.json());
+        const perMonth = {};
+        for (const row of rows || []) {
+          const key = String(row.date || '').slice(0, 7);
+          if (key) perMonth[key] = (perMonth[key] || 0) + 1;
+        }
+        const shape = Object.keys(perMonth).sort().map((m) => `${m}:${perMonth[m]}`).join(' ');
         console.log(
-          `[store] ${name}: ${total} row(s), ` +
-          `${oldest?.[0]?.date || 'none'} -> ${newest?.[0]?.date || 'none'}`
+          `[store] ${name}: ${(rows || []).length} row(s)  ${shape || 'none'}`
         );
       }
     } catch (e) {
