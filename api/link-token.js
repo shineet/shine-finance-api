@@ -59,6 +59,9 @@ export default async function handler(req, res) {
       // Stable per-user id. One human uses this backend, so a constant is fine
       // and keeps re-links mapping to the same Plaid user.
       user: { client_user_id: 'shine' },
+      // New links tell /api/plaid-webhook when transactions arrive, which is
+      // what announces a deposit without the app being opened.
+      webhook: 'https://shine-finance-api.vercel.app/api/plaid-webhook',
       // liabilities supplies APR, minimum payment, due dates and statement
       // balances -- the inputs payoff projection needs. It MUST be optional,
       // not required: as a required product Plaid rejects any institution
