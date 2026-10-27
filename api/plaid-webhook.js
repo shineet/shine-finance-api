@@ -12,6 +12,7 @@ import crypto from 'node:crypto';
 import { plaid, authorize, listItems } from '../lib/plaid.js';
 import { syncItem } from '../lib/sync.js';
 import { announceDeposits } from '../lib/deposits.js';
+import { pushAll } from '../lib/push.js';
 
 export const WEBHOOK_URL = 'https://shine-finance-api.vercel.app/api/plaid-webhook';
 
@@ -63,6 +64,11 @@ async function verify(req, raw) {
 export default async function handler(req, res) {
   if (req.method === 'GET') {
     if (!authorize(req, res)) return;
+    // ?test=1 sends a sample notice to every registered phone and nothing else.
+    if (req.query.test === '1') {
+      const sent = await pushAll('Money in', 'Test: deposit notices are working');
+      return res.status(200).json({ sent });
+    }
     const items = await listItems();
     const results = [];
     for (const item of items) {
