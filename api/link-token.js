@@ -22,7 +22,7 @@ export default async function handler(req, res) {
     // Passing the existing access_token opens Link on that bank's own login,
     // fixes the Item in place, and keeps the id, the accounts and the
     // transactions exactly as they were.
-    const { item_id } = req.body || {};
+    const { item_id, add } = req.body || {};
     let updateFor = {};
     if (item_id) {
       const items = await listItems();
@@ -34,7 +34,7 @@ export default async function handler(req, res) {
     // identical from outside and behave completely differently: one repairs a
     // broken Item, the other creates a second one beside it. When a reconnect
     // "did not work", the first thing worth knowing is which of the two ran.
-    console.log('link-token:', item_id ? `UPDATE mode for ${item_id}` : 'NEW link');
+    console.log('link-token:', item_id ? `UPDATE mode for ${item_id}${add ? ` adding ${add}` : ''}` : 'NEW link');
     // The completion redirect is the likeliest thing to break a session AFTER
     // the bank has authorised: Plaid rejects a redirect URI that is not
     // registered in the dashboard, and the failure surfaces as Link's generic
@@ -70,7 +70,14 @@ export default async function handler(req, res) {
       // Both are omitted in update mode: Plaid rejects a product list when
       // repairing an existing Item, since it already knows what it was
       // authorised for.
-      ...(item_id ? {} : { products: ['transactions'], optional_products: ['liabilities'] }),
+      // investments is optional for the same reason: most banks have none.
+      ...(item_id ? {} : { products: ['transactions'], optional_products: ['liabilities', 'investments'] }),
+      // Update mode can ask for a product the Item was never linked with
+      // (investments, 2026-11-02): the person approves it in Link, and the
+      // product's endpoints then answer instead of ADDITIONAL_CONSENT_REQUIRED.
+      ...(item_id && Array.isArray(add) && add.length
+        ? { additional_consented_products: add.filter((p) => ['investments', 'liabilities'].includes(p)) }
+        : {}),
       // How much history a NEW Item starts with. This is where days_requested
       // actually belongs; it was on /transactions/sync, which rejects it.
       // Recurring detection needs at least 180 days to be reliable, so ask for
