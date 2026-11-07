@@ -16,10 +16,11 @@ function primaryApr(aprs = []) {
 
 export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
-  if (!authorize(req, res)) return;
+  const user = await authorize(req, res);
+  if (!user) return;
 
   try {
-    const items = await listItems();
+    const items = await listItems(user);
     const credit = [];
     const errors = [];
 

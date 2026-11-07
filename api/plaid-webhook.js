@@ -9,7 +9,7 @@
 // An unsigned call is refused before it can make this backend do anything.
 
 import crypto from 'node:crypto';
-import { plaid, authorize, listItems } from '../lib/plaid.js';
+import { plaid, authorize, listItems, itemById } from '../lib/plaid.js';
 import { syncItem } from '../lib/sync.js';
 import { announceDeposits } from '../lib/deposits.js';
 import { pushAll } from '../lib/push.js';
@@ -63,13 +63,14 @@ async function verify(req, raw) {
 
 export default async function handler(req, res) {
   if (req.method === 'GET') {
-    if (!authorize(req, res)) return;
+    const user = await authorize(req, res);
+    if (!user) return;
     // ?test=1 sends a sample notice to every registered phone and nothing else.
     if (req.query.test === '1') {
-      const sent = await pushAll('Money in', 'Test: deposit notices are working');
+      const sent = await pushAll(user, 'Money in', 'Test: deposit notices are working');
       return res.status(200).json({ sent });
     }
-    const items = await listItems();
+    const items = await listItems(user);
     const results = [];
     for (const item of items) {
       const institution = item.institution_name || item.item_id;
@@ -108,7 +109,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const item = (await listItems()).find((i) => i.item_id === event.item_id);
+    const item = await itemById(event.item_id);
     if (!item) return res.status(200).json({ ignored: 'unknown item' });
     const result = await syncItem(item);
     const sent = await announceDeposits(item, result);

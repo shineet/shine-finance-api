@@ -7,12 +7,14 @@
 // regardless of how recently a sync ran.
 
 import { plaid, authorize, listItems } from '../lib/plaid.js';
-import { syncItem, sbHeaders } from '../lib/sync.js';
+import { syncItem } from '../lib/sync.js';
+import { sbHeaders, rest, forUser } from '../lib/db.js';
 import { announceDeposits } from '../lib/deposits.js';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
-  if (!authorize(req, res)) return;
+  const user = await authorize(req, res);
+  if (!user) return;
 
   // A full rebuild: ask Plaid to re-pull each Item, then replay its entire
   // history from the beginning instead of from the saved cursor.
@@ -29,7 +31,7 @@ export default async function handler(req, res) {
   const full = req.query.full === '1';
 
   try {
-    const items = await listItems();
+    const items = await listItems(user);
     const errors = [];
     let addedCount = 0;
     let removedCount = 0;
@@ -83,12 +85,15 @@ export default async function handler(req, res) {
     // whose newest row is weeks old, or whose oldest row starts after the
     // history should, is invisible from the app: a missing transaction has no
     // row to be missing from.
-    try {
+    // The owner's only. These log merchant names and per-day activity, which
+    // were his to read while diagnosing his own banks; nobody else's spending
+    // belongs in a log.
+    if (user.legacy) try {
       const names = [...new Set(items.map((i) => i.institution_name || i.item_id))];
       for (const name of names) {
         const base =
-          `${process.env.SUPABASE_URL}/rest/v1/plaid_transactions` +
-          `?select=date&institution=eq.${encodeURIComponent(name)}`;
+          rest(`plaid_transactions?select=date&${forUser(user)}`) +
+          `&institution=eq.${encodeURIComponent(name)}`;
         // Which DAYS have nothing.
         //
         // The monthly counts came back healthy -- Chase had 273 rows in August
@@ -148,11 +153,11 @@ export default async function handler(req, res) {
     // need completely different answers and cannot be told apart from outside.
     //
     // Dates and institutions only. No amounts.
-    try {
+    if (user.legacy) try {
       const probe = String(req.query.probe || 'infosys').slice(0, 40);
       const url =
-        `${process.env.SUPABASE_URL}/rest/v1/plaid_transactions` +
-        `?select=date,institution,account_id,name&name=ilike.*${encodeURIComponent(probe)}*` +
+        rest(`plaid_transactions?select=date,institution,account_id,name&${forUser(user)}`) +
+        `&name=ilike.*${encodeURIComponent(probe)}*` +
         `&date=gte.2026-07-01&order=date.desc&limit=60`;
       const hits = await fetch(url, { headers: sbHeaders() }).then((r) => r.json());
       console.log(`[probe] "${probe}" since 2026-07-01: ${(hits || []).length} row(s)`);

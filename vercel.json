@@ -1,0 +1,6 @@
+{
+  "rewrites": [
+    { "source": "/api/history", "destination": "/api/records?kind=history" },
+    { "source": "/api/transactions", "destination": "/api/records?kind=transactions" }
+  ]
+}

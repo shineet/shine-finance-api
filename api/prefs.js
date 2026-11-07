@@ -6,20 +6,16 @@
 // they live here rather than in each device's local storage.
 
 import { authorize } from '../lib/plaid.js';
-
-const sbHeaders = () => ({
-  'Content-Type': 'application/json',
-  apikey: process.env.SUPABASE_SECRET_KEY,
-  Authorization: `Bearer ${process.env.SUPABASE_SECRET_KEY}`,
-});
+import { sbHeaders, rest, forUser } from '../lib/db.js';
 
 export default async function handler(req, res) {
-  if (!authorize(req, res)) return;
+  const user = await authorize(req, res);
+  if (!user) return;
 
   try {
     if (req.method === 'GET') {
       const r = await fetch(
-        `${process.env.SUPABASE_URL}/rest/v1/user_prefs?select=key,value`,
+        rest(`user_prefs?select=key,value&${forUser(user)}`),
         { headers: sbHeaders() }
       );
       if (!r.ok) throw new Error(await r.text());
@@ -33,10 +29,11 @@ export default async function handler(req, res) {
       const { key, value } = req.body || {};
       if (!key) return res.status(400).json({ error: 'key required' });
 
-      const r = await fetch(`${process.env.SUPABASE_URL}/rest/v1/user_prefs`, {
+      const r = await fetch(rest('user_prefs'), {
         method: 'POST',
         headers: { ...sbHeaders(), Prefer: 'resolution=merge-duplicates,return=minimal' },
         body: JSON.stringify({
+          user_id: user.id,
           key,
           value: value ?? null,
           updated_at: new Date().toISOString(),

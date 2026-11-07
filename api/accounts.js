@@ -2,21 +2,17 @@
 // Live balances across every linked institution.
 
 import { plaid, authorize, listItems } from '../lib/plaid.js';
-
-const sbHeaders = () => ({
-  'Content-Type': 'application/json',
-  apikey: process.env.SUPABASE_SECRET_KEY,
-  Authorization: `Bearer ${process.env.SUPABASE_SECRET_KEY}`,
-});
+import { sbHeaders, rest, forUser } from '../lib/db.js';
 
 // Plaid only ever reports "now", so progress over time has to be recorded as
 // it happens -- there is no way to backfill a balance for a past date. Every
 // accounts read snapshots today's figures, overwriting the same day's row.
-async function snapshot(accounts) {
+async function snapshot(user, accounts) {
   if (!accounts.length) return;
   const today = new Date().toISOString().slice(0, 10);
   const rows = accounts.map((a) => ({
     account_id: a.account_id,
+    user_id: user.id,
     as_of: today,
     institution: a.institution,
     name: a.name,
@@ -27,7 +23,7 @@ async function snapshot(accounts) {
     limit: a.limit,
   }));
   try {
-    await fetch(`${process.env.SUPABASE_URL}/rest/v1/balance_snapshots`, {
+    await fetch(rest('balance_snapshots'), {
       method: 'POST',
       headers: { ...sbHeaders(), Prefer: 'resolution=merge-duplicates,return=minimal' },
       body: JSON.stringify(rows),
@@ -40,10 +36,11 @@ async function snapshot(accounts) {
 
 export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
-  if (!authorize(req, res)) return;
+  const user = await authorize(req, res);
+  if (!user) return;
 
   try {
-    const items = await listItems();
+    const items = await listItems(user);
     const accounts = [];
     const errors = [];
 
@@ -88,7 +85,7 @@ export default async function handler(req, res) {
       })
     );
 
-    await snapshot(accounts);
+    await snapshot(user, accounts);
 
     // Accounts that used to exist and no longer do.
     //
@@ -108,8 +105,8 @@ export default async function handler(req, res) {
     let retired = [];
     try {
       const rows = await fetch(
-        `${process.env.SUPABASE_URL}/rest/v1/balance_snapshots` +
-        `?select=account_id,name,institution,type,subtype,as_of&order=as_of.desc&limit=1000`,
+        rest(`balance_snapshots?select=account_id,name,institution,type,subtype,as_of&${forUser(user)}`) +
+        '&order=as_of.desc&limit=1000',
         { headers: sbHeaders() }
       ).then((r) => r.json());
       const live = new Set(accounts.map((a) => a.account_id));

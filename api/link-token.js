@@ -9,7 +9,8 @@ import { plaid, authorize, listItems } from '../lib/plaid.js';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
-  if (!authorize(req, res)) return;
+  const user = await authorize(req, res);
+  if (!user) return;
 
   try {
     // UPDATE MODE: repairing one bank rather than adding another.
@@ -25,7 +26,7 @@ export default async function handler(req, res) {
     const { item_id, add } = req.body || {};
     let updateFor = {};
     if (item_id) {
-      const items = await listItems();
+      const items = await listItems(user);
       const target = items.find((i) => i.item_id === item_id);
       if (!target) return res.status(404).json({ error: 'No such connection' });
       updateFor = { access_token: target.access_token };
@@ -56,9 +57,10 @@ export default async function handler(req, res) {
       client_name: 'MyFinance',
       language: 'en',
       country_codes: ['US'],
-      // Stable per-user id. One human uses this backend, so a constant is fine
-      // and keeps re-links mapping to the same Plaid user.
-      user: { client_user_id: 'shine' },
+      // Stable per-person id. The owner keeps the 'shine' he was linked under,
+      // so his re-links still map to the same Plaid user; everyone else is
+      // their users row id, which says nothing about who they are.
+      user: { client_user_id: user.plaid_client_user_id || user.id },
       // New links tell /api/plaid-webhook when transactions arrive, which is
       // what announces a deposit without the app being opened.
       webhook: 'https://shine-finance-api.vercel.app/api/plaid-webhook',

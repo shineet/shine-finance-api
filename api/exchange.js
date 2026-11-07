@@ -10,7 +10,8 @@ import { plaid, authorize, saveItem } from '../lib/plaid.js';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
-  if (!authorize(req, res)) return;
+  const user = await authorize(req, res);
+  if (!user) return;
 
   const { link_token } = req.body || {};
   if (!link_token) return res.status(400).json({ error: 'link_token required' });
@@ -58,6 +59,7 @@ export default async function handler(req, res) {
       }
 
       await saveItem({
+        userId: user.id,
         itemId: exchanged.item_id,
         accessToken: exchanged.access_token,
         institutionName,

@@ -7,12 +7,7 @@
 // produced the answer, since the fallback is rougher and the UI should say so.
 
 import { plaid, authorize, listItems } from '../lib/plaid.js';
-
-const sbHeaders = () => ({
-  'Content-Type': 'application/json',
-  apikey: process.env.SUPABASE_SECRET_KEY,
-  Authorization: `Bearer ${process.env.SUPABASE_SECRET_KEY}`,
-});
+import { sbHeaders, rest, forUser } from '../lib/db.js';
 
 function shapeStream(s, direction) {
   return {
@@ -92,10 +87,11 @@ function inferStreams(rows) {
 
 export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
-  if (!authorize(req, res)) return;
+  const user = await authorize(req, res);
+  if (!user) return;
 
   try {
-    const items = await listItems();
+    const items = await listItems(user);
     const inflows = [];
     const outflows = [];
     const errors = [];
@@ -123,8 +119,8 @@ export default async function handler(req, res) {
       const since = new Date();
       since.setDate(since.getDate() - 365);
       const url =
-        `${process.env.SUPABASE_URL}/rest/v1/plaid_transactions` +
-        `?select=account_id,date,name,amount,category&date=gte.${since.toISOString().slice(0, 10)}` +
+        rest(`plaid_transactions?select=account_id,date,name,amount,category&${forUser(user)}`) +
+        `&date=gte.${since.toISOString().slice(0, 10)}` +
         `&order=date.asc&limit=2000`;
       const r = await fetch(url, { headers: sbHeaders() });
       if (r.ok) {

@@ -6,14 +6,9 @@
 // what actually frees it.
 
 import { plaid, authorize, listItems } from '../lib/plaid.js';
+import { sbHeaders, rest, forUser } from '../lib/db.js';
 
-const sbHeaders = () => ({
-  'Content-Type': 'application/json',
-  apikey: process.env.SUPABASE_SECRET_KEY,
-  Authorization: `Bearer ${process.env.SUPABASE_SECRET_KEY}`,
-});
-
-async function forget(itemId, accountIds, deleteTransactions) {
+async function forget(user, itemId, accountIds, deleteTransactions) {
   // Transactions reference accounts, not items, so clearing them means going
   // by account id.
   //
@@ -30,11 +25,11 @@ async function forget(itemId, accountIds, deleteTransactions) {
   if (accountIds.length && deleteTransactions) {
     const list = accountIds.map(encodeURIComponent).join(',');
     await fetch(
-      `${process.env.SUPABASE_URL}/rest/v1/plaid_transactions?account_id=in.(${list})`,
+      rest(`plaid_transactions?${forUser(user)}&account_id=in.(${list})`),
       { method: 'DELETE', headers: { ...sbHeaders(), Prefer: 'return=minimal' } }
     );
   }
-  await fetch(`${process.env.SUPABASE_URL}/rest/v1/plaid_items?item_id=eq.${itemId}`, {
+  await fetch(rest(`plaid_items?${forUser(user)}&item_id=eq.${encodeURIComponent(itemId)}`), {
     method: 'DELETE',
     headers: { ...sbHeaders(), Prefer: 'return=minimal' },
   });
@@ -42,7 +37,8 @@ async function forget(itemId, accountIds, deleteTransactions) {
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
-  if (!authorize(req, res)) return;
+  const user = await authorize(req, res);
+  if (!user) return;
 
   // Deletion is opt-in and explicit. Anything else -- a missing field, an old
   // build, a caller that has not thought about it -- keeps the history, which
@@ -54,7 +50,7 @@ export default async function handler(req, res) {
   if (!item_id && !all) return res.status(400).json({ error: 'item_id or all required' });
 
   try {
-    const items = await listItems();
+    const items = await listItems(user);
     const targets = all ? items : items.filter((i) => i.item_id === item_id);
     if (!targets.length) return res.status(404).json({ error: 'No matching item' });
 
@@ -81,7 +77,7 @@ export default async function handler(req, res) {
         errors.push({ institution, error: err.message, code: err.plaidCode });
       }
 
-      await forget(item.item_id, accountIds, deleteTransactions);
+      await forget(user, item.item_id, accountIds, deleteTransactions);
       console.log(
         `[unlink] ${institution}: connection removed, ` +
         `${deleteTransactions ? `${accountIds.length} account(s) of transactions DELETED` : 'history kept'}`
