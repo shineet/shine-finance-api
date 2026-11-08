@@ -8,6 +8,16 @@
     {
       "source": "/api/transactions",
       "destination": "/api/records?kind=transactions"
+    },
+    {
+      "source": "/api/app-store-notifications",
+      "destination": "/api/plaid-webhook?source=app-store"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/plaid-webhook?task=lapse",
+      "schedule": "0 14 * * *"
     }
   ]
 }

@@ -3,6 +3,15 @@
 // GET  /api/plaid-webhook   (bearer) points every linked Item's webhook here.
 //                           Run once, and again after linking a bank.
 //
+// Two more inbound callers live here too, because Vercel Hobby allows twelve
+// functions and api/ already has twelve:
+// POST /api/app-store-notifications  (rewritten to ?source=app-store) Apple's
+//                           Server Notifications V2: renewals, expiries,
+//                           refunds (lib/entitlement.js applyNotification).
+// GET  /api/plaid-webhook?task=lapse  Vercel Cron, daily, with CRON_SECRET:
+//                           removes real banks 30 days after a subscription
+//                           ends (lib/lapse.js). &dry=1 only reports.
+//
 // The POST is open to the internet, so nothing is trusted until Plaid's
 // signature checks out: an ES256 JWT in the Plaid-Verification header, signed
 // with a key Plaid publishes, carrying the SHA-256 of the exact body bytes.
@@ -13,6 +22,9 @@ import { plaid, authorize, listItems, itemById, isSandboxToken } from '../lib/pl
 import { syncItem } from '../lib/sync.js';
 import { announceDeposits } from '../lib/deposits.js';
 import { pushAll } from '../lib/push.js';
+import { applyNotification, isEntitled } from '../lib/entitlement.js';
+import { sweepLapsed } from '../lib/lapse.js';
+import { sbHeaders, rest } from '../lib/db.js';
 
 export const WEBHOOK_URL = 'https://shine-finance-api.vercel.app/api/plaid-webhook';
 
@@ -61,7 +73,44 @@ async function verify(req, raw) {
   return null;
 }
 
+// Vercel Cron sends `Authorization: Bearer $CRON_SECRET`. Unset means no one
+// gets in, not everyone.
+function isCron(req) {
+  const secret = process.env.CRON_SECRET;
+  if (!secret) return false;
+  const given = Buffer.from(String(req.headers.authorization || ''));
+  const want = Buffer.from(`Bearer ${secret}`);
+  return given.length === want.length && crypto.timingSafeEqual(given, want);
+}
+
+async function appStoreNotification(req, res) {
+  try {
+    const { signedPayload } = JSON.parse((await readRaw(req)).toString() || '{}');
+    const what = await applyNotification(signedPayload);
+    console.log(`[app-store] ${what}`);
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    // Anything unsigned or for another app is refused for good; a database
+    // failure gets a 500 so Apple tries again later.
+    const refused = !/save failed/.test(err.message);
+    console.error(`[app-store] ${refused ? 'refused' : 'failed'}: ${err.message}`);
+    return res.status(refused ? 401 : 500).json({ error: refused ? 'unverified' : 'try again' });
+  }
+}
+
 export default async function handler(req, res) {
+  if (req.method === 'POST' && req.query.source === 'app-store') return appStoreNotification(req, res);
+  if (req.method === 'GET' && req.query.task === 'lapse') {
+    if (!isCron(req)) return res.status(401).json({ error: 'Unauthorized' });
+    try {
+      const report = await sweepLapsed({ dry: req.query.dry === '1' });
+      console.log(`[lapse] warned ${report.warned}, removed ${report.removed}, errors ${report.errors.length}`);
+      return res.status(200).json(report);
+    } catch (err) {
+      console.error(`[lapse] failed: ${err.message}`);
+      return res.status(500).json({ error: err.message });
+    }
+  }
   if (req.method === 'GET') {
     const user = await authorize(req, res);
     if (!user) return;
@@ -114,6 +163,13 @@ export default async function handler(req, res) {
   try {
     const item = await itemById(event.item_id);
     if (!item) return res.status(200).json({ ignored: 'unknown item' });
+    // Same rule as /api/sync: a lapsed account's real banks keep what they
+    // have but are not refreshed.
+    if (!isSandboxToken(item.access_token)) {
+      const r = await fetch(rest(`users?select=legacy,sub_expires_at&id=eq.${item.user_id}&limit=1`), { headers: sbHeaders() });
+      const owner = r.ok ? (await r.json())[0] : null;
+      if (!isEntitled(owner)) return res.status(200).json({ ignored: 'not subscribed' });
+    }
     const result = await syncItem(item);
     const sent = await announceDeposits(item, result);
     return res.status(200).json({ synced: result.upserts.length, notified: sent });
