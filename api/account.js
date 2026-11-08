@@ -1,9 +1,10 @@
 // The person behind the app.
 //
-// POST   /api/account  { op: 'signin', identity_token, email?, device? }
+// POST   /api/account  { op: 'signin', identity_token, authorization_code?, email?, device? }
 //          Sign in with Apple. Verifies Apple's identity token, finds or makes
 //          the users row, and returns a session token the app sends as its
-//          Bearer from then on. No other credential is ever issued.
+//          Bearer from then on. No other credential is ever issued. The code
+//          is swapped for the Apple grant that deletion revokes (lib/apple.js).
 // GET    /api/account  (session)  who this is, and how many banks are linked
 // POST   /api/account  { op: 'signout' }  (session)  ends this device's session
 // POST   /api/account  { op: 'subscription', transactions: [jws] }  (session)
@@ -12,7 +13,8 @@
 // DELETE /api/account  { confirm: 'DELETE' }  (session)
 //          Deletes the account: every bank connection released at Plaid, then
 //          the users row, which takes every row of theirs with it (each table's
-//          user_id is ON DELETE CASCADE). Apple requires this to be in the app.
+//          user_id is ON DELETE CASCADE), and the Sign in with Apple grant
+//          revoked. Apple requires both.
 //
 // The owner's first Apple sign-in claims the owner row. A device still holding
 // the owner's APP_TOKEN sends it as the Bearer on that sign-in, and the Apple
@@ -27,6 +29,8 @@ import {
 import { plaid, listItems } from '../lib/plaid.js';
 import { sbHeaders, rest } from '../lib/db.js';
 import { verifyTransaction, entitlement } from '../lib/entitlement.js';
+import { seal, open } from '../lib/secrets.js';
+import * as apple from '../lib/apple.js';
 
 async function findByAppleSub(sub) {
   const r = await fetch(
@@ -66,8 +70,25 @@ function signupAllowed(claims) {
   return verified && !!claims.email && allowed.includes(String(claims.email).toLowerCase());
 }
 
+/// Swaps the sign-in's one-time code for the refresh token deletion will
+/// revoke. Never fails the sign-in: without it, only the revocation is lost.
+async function keepAppleGrant(userId, sub, code) {
+  if (typeof code !== 'string' || !code || !apple.configured()) return;
+  try {
+    const token = await apple.refreshTokenFor(code, sub);
+    const r = await fetch(rest(`users?id=eq.${userId}`), {
+      method: 'PATCH',
+      headers: { ...sbHeaders(), Prefer: 'return=minimal' },
+      body: JSON.stringify({ apple_refresh_token: seal(token) }),
+    });
+    if (!r.ok) throw new Error(`save ${r.status}`);
+  } catch (err) {
+    console.warn(`[account] Apple grant not kept: ${err.message}`);
+  }
+}
+
 async function signIn(req, res) {
-  const { identity_token, email, device } = req.body || {};
+  const { identity_token, authorization_code, email, device } = req.body || {};
   let claims;
   try {
     claims = await verifyAppleIdentity(identity_token);
@@ -105,6 +126,7 @@ async function signIn(req, res) {
     await patchUser(user.id, { last_seen_at: now, ...(mail ? { email: mail } : {}) });
   }
 
+  await keepAppleGrant(user.id, claims.sub, authorization_code);
   const session = await createSession(user.id, device);
   return res.status(200).json({ session, user: { id: user.id, email: mail || user.email || null, is_new: isNew } });
 }
@@ -178,13 +200,26 @@ async function deleteAccount(req, res, user) {
     }
   }
 
+  // End the Sign in with Apple link too, as Apple requires. A failure is
+  // logged, not fatal: the person asked for their data gone, and it goes.
+  let appleRevoked = false;
+  if (apple.configured()) {
+    try {
+      const g = await fetch(rest(`users?select=apple_refresh_token&id=eq.${user.id}`), { headers: sbHeaders() });
+      const stored = g.ok ? (await g.json())[0]?.apple_refresh_token : null;
+      if (stored) { await apple.revoke(open(stored)); appleRevoked = true; }
+    } catch (err) {
+      console.warn(`[account] Apple revoke failed: ${err.message}`);
+    }
+  }
+
   const r = await fetch(rest(`users?id=eq.${user.id}&legacy=is.false`), {
     method: 'DELETE',
     headers: { ...sbHeaders(), Prefer: 'return=representation' },
   });
   if (!r.ok) throw new Error(`delete failed: ${await r.text()}`);
   const gone = (await r.json()).length;
-  console.log(`[account] deleted: ${items.length} connection(s) released, ${failed.length} Plaid error(s)`);
+  console.log(`[account] deleted: ${items.length} connection(s) released, ${failed.length} Plaid error(s), Apple ${appleRevoked ? 'revoked' : 'not revoked'}`);
   return res.status(200).json({ deleted: gone === 1, connections_released: items.length - failed.length });
 }
 
