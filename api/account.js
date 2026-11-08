@@ -6,6 +6,9 @@
 //          Bearer from then on. No other credential is ever issued.
 // GET    /api/account  (session)  who this is, and how many banks are linked
 // POST   /api/account  { op: 'signout' }  (session)  ends this device's session
+// POST   /api/account  { op: 'subscription', transactions: [jws] }  (session)
+//          The App Store transactions the app holds. Verified against Apple's
+//          root (lib/entitlement.js); the newest live one is recorded.
 // DELETE /api/account  { confirm: 'DELETE' }  (session)
 //          Deletes the account: every bank connection released at Plaid, then
 //          the users row, which takes every row of theirs with it (each table's
@@ -23,6 +26,7 @@ import {
 } from '../lib/auth.js';
 import { plaid, listItems } from '../lib/plaid.js';
 import { sbHeaders, rest } from '../lib/db.js';
+import { verifyTransaction, entitlement } from '../lib/entitlement.js';
 
 async function findByAppleSub(sub) {
   const r = await fetch(
@@ -105,6 +109,52 @@ async function signIn(req, res) {
   return res.status(200).json({ session, user: { id: user.id, email: mail || user.email || null, is_new: isNew } });
 }
 
+async function recordSubscription(req, res, user) {
+  const list = (req.body || {}).transactions;
+  if (!Array.isArray(list) || !list.length || list.length > 20) {
+    return res.status(400).json({ error: 'transactions: [jws] required' });
+  }
+  let best = null;
+  for (const jws of list) {
+    let t;
+    try {
+      t = verifyTransaction(jws);
+    } catch (err) {
+      console.warn(`[subscription] refused a transaction: ${err.message}`);
+      continue;
+    }
+    if (t.revocationDate) continue;
+    // Purchases made in the app carry the buyer's MyFinance id. One bought
+    // under another account is that account's, whoever holds the Apple ID.
+    if (t.appAccountToken && t.appAccountToken.toLowerCase() !== user.id.toLowerCase()) {
+      console.warn('[subscription] transaction belongs to another account');
+      continue;
+    }
+    if (!best || (t.expiresDate || 0) > (best.expiresDate || 0)) best = t;
+  }
+  if (!best) return res.status(200).json(entitlement(user));
+
+  const fields = {
+    sub_expires_at: new Date(best.expiresDate).toISOString(),
+    sub_product: best.productId,
+    sub_environment: best.environment,
+    sub_original_txn: String(best.originalTransactionId),
+  };
+  const r = await fetch(rest(`users?id=eq.${user.id}`), {
+    method: 'PATCH',
+    headers: { ...sbHeaders(), Prefer: 'return=minimal' },
+    body: JSON.stringify(fields),
+  });
+  if (r.status === 409) {
+    // sub_original_txn is unique: this subscription already unlocks a
+    // different MyFinance account.
+    return res.status(409).json({ error: 'This App Store subscription is already used by another MyFinance account.' });
+  }
+  if (!r.ok) throw new Error(`subscription save failed: ${await r.text()}`);
+  console.log(`[subscription] ${best.productId} (${best.environment}) until ${fields.sub_expires_at}`);
+  return res.status(200).json(entitlement({ ...user, ...fields }));
+}
+
 async function deleteAccount(req, res, user) {
   if ((req.body || {}).confirm !== 'DELETE') {
     return res.status(400).json({ error: "confirm: 'DELETE' required" });
@@ -153,12 +203,14 @@ export default async function handler(req, res) {
         owner: !!user.legacy,
         signed_in_with_apple: !!user.apple_sub,
         connections: items.length,
+        ...entitlement(user),
       });
     }
     if (req.method === 'POST' && (req.body || {}).op === 'signout') {
       if (!isOwnerToken(callerToken(req))) await endSession(callerToken(req));
       return res.status(200).json({ signed_out: true });
     }
+    if (req.method === 'POST' && (req.body || {}).op === 'subscription') return await recordSubscription(req, res, user);
     if (req.method === 'DELETE') return await deleteAccount(req, res, user);
     return res.status(405).json({ error: 'Method not allowed' });
   } catch (err) {

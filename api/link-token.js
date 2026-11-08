@@ -6,6 +6,7 @@
 // with their bank, and Plaid redirects back to the app's custom scheme.
 
 import { plaid, authorize, listItems } from '../lib/plaid.js';
+import { isEntitled } from '../lib/entitlement.js';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
@@ -24,6 +25,11 @@ export default async function handler(req, res) {
     // fixes the Item in place, and keeps the id, the accounts and the
     // transactions exactly as they were.
     const { item_id, add } = req.body || {};
+    // Linking a real bank is what the subscription buys; repairing one that
+    // is already linked is not gated, so a lapse never strands a broken link.
+    if (!item_id && !isEntitled(user)) {
+      return res.status(402).json({ error: 'subscription_required' });
+    }
     let updateFor = {};
     if (item_id) {
       const items = await listItems(user);

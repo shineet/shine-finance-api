@@ -6,7 +6,8 @@
 // keeps it current -- /api/transactions then always serves full history,
 // regardless of how recently a sync ran.
 
-import { plaid, authorize, listItems } from '../lib/plaid.js';
+import { plaid, authorize, listItems, isSandboxToken } from '../lib/plaid.js';
+import { isEntitled } from '../lib/entitlement.js';
 import { syncItem } from '../lib/sync.js';
 import { sbHeaders, rest, forUser } from '../lib/db.js';
 import { announceDeposits } from '../lib/deposits.js';
@@ -31,7 +32,10 @@ export default async function handler(req, res) {
   const full = req.query.full === '1';
 
   try {
-    const items = await listItems(user);
+    // Without a live subscription only the sample bank refreshes; real banks
+    // keep what is already stored.
+    const entitled = isEntitled(user);
+    const items = (await listItems(user)).filter((i) => entitled || isSandboxToken(i.access_token));
     const errors = [];
     let addedCount = 0;
     let removedCount = 0;
