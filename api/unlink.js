@@ -5,10 +5,19 @@
 // Plaid and keeps consuming a slot (10 on the Trial plan). /item/remove is
 // what actually frees it.
 
-import { plaid, authorize, listItems } from '../lib/plaid.js';
+import { plaid, authorize, listItems, isSandboxToken } from '../lib/plaid.js';
 import { sbHeaders, rest, forUser } from '../lib/db.js';
 
-async function forget(user, itemId, accountIds, deleteTransactions) {
+async function forget(user, itemId, accountIds, deleteTransactions, sample) {
+  // The sample bank's figures are made up. Kept, they would sit in the real
+  // spending history and balance chart forever, so they go with it, always.
+  if (sample && accountIds.length) {
+    const list = accountIds.map(encodeURIComponent).join(',');
+    await fetch(
+      rest(`balance_snapshots?${forUser(user)}&account_id=in.(${list})`),
+      { method: 'DELETE', headers: { ...sbHeaders(), Prefer: 'return=minimal' } }
+    );
+  }
   // Transactions reference accounts, not items, so clearing them means going
   // by account id.
   //
@@ -77,10 +86,12 @@ export default async function handler(req, res) {
         errors.push({ institution, error: err.message, code: err.plaidCode });
       }
 
-      await forget(user, item.item_id, accountIds, deleteTransactions);
+      const sample = isSandboxToken(item.access_token);
+      const erase = deleteTransactions || sample;
+      await forget(user, item.item_id, accountIds, erase, sample);
       console.log(
         `[unlink] ${institution}: connection removed, ` +
-        `${deleteTransactions ? `${accountIds.length} account(s) of transactions DELETED` : 'history kept'}`
+        `${erase ? `${accountIds.length} account(s) of transactions DELETED` : 'history kept'}`
       );
       removed.push(institution);
     }

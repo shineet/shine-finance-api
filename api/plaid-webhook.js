@@ -9,7 +9,7 @@
 // An unsigned call is refused before it can make this backend do anything.
 
 import crypto from 'node:crypto';
-import { plaid, authorize, listItems, itemById } from '../lib/plaid.js';
+import { plaid, authorize, listItems, itemById, isSandboxToken } from '../lib/plaid.js';
 import { syncItem } from '../lib/sync.js';
 import { announceDeposits } from '../lib/deposits.js';
 import { pushAll } from '../lib/push.js';
@@ -74,6 +74,9 @@ export default async function handler(req, res) {
     const results = [];
     for (const item of items) {
       const institution = item.institution_name || item.item_id;
+      // Sandbox webhooks are signed with sandbox keys, which the production
+      // check cannot verify, so the sample bank gets none.
+      if (isSandboxToken(item.access_token)) continue;
       try {
         await plaid('/item/webhook/update', { access_token: item.access_token, webhook: WEBHOOK_URL });
         results.push({ institution, ok: true });
