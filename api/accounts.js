@@ -1,5 +1,5 @@
 // GET /api/accounts
-// Live balances across every linked institution.
+// Balances across every linked institution, as of Plaid's latest refresh.
 
 import { plaid, authorize, listItems } from '../lib/plaid.js';
 import { sbHeaders, rest, forUser } from '../lib/db.js';
@@ -49,7 +49,12 @@ export default async function handler(req, res) {
     await Promise.all(
       items.map(async (item) => {
         try {
-          const out = await plaid('/accounts/balance/get', { access_token: item.access_token });
+          // /accounts/get, not /accounts/balance/get. The balance endpoint is
+          // Plaid's paid real-time Balance product, charged per call, and this
+          // runs on every app open. The balances /accounts/get returns come
+          // with Transactions and are refreshed by Plaid several times a day,
+          // which is as fresh as a dashboard needs.
+          const out = await plaid('/accounts/get', { access_token: item.access_token });
           for (const acct of out.accounts || []) {
             accounts.push({
               account_id: acct.account_id,
