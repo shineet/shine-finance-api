@@ -20,6 +20,7 @@
 // Anthropic when they ask. That is disclosed in the app's privacy policy.
 
 import { authorize } from '../lib/auth.js';
+import { plaid, listItems } from '../lib/plaid.js';
 import { sbHeaders, rest, forUser } from '../lib/db.js';
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
@@ -30,6 +31,7 @@ const SYSTEM = `You are the "Ask" assistant inside MyFinance, a personal finance
 
 You have tools that see their REAL financial data. Reach for them instead of giving generic answers:
 - get_balances: how much they have right now -- cash, credit-card debt, investments, net worth, available credit, and each account. Call this BEFORE giving any advice about what to do with cash, savings or debt, or any question about their overall position, so the answer fits their actual numbers.
+- get_investments: whether their investments are doing well -- total value, cost basis, unrealized gain and percent, each holding's gain, and the recorded balance trend. Use for any question about investment returns, performance, gains or losses, or a specific holding. Lead with the real gain or percent rather than generic market averages; mention the note if cost basis is only partial.
 - search_transactions: what they bought, paid, earned or spent, or a specific charge. Amounts are signed: negative is money out (spending), positive is money in.
 - web_search: general knowledge the app does not hold (what a merchant or company is, e.g. "what is DistroKid"). If the name also appears in their transactions, you may search those too to tie it to a charge.
 
@@ -75,8 +77,100 @@ const TOOLS = [
       "Read the signed-in user's current balances from the latest daily snapshot: each account's balance, plus totals for cash, credit-card debt, investments, net worth and available credit. Use for any question about how much they have, their net worth or overall position, or what to do with cash, savings or debt. A credit account's 'current' is the amount OWED (a positive number); cash and investments are assets.",
     input_schema: { type: 'object', properties: {} },
   },
+  {
+    name: 'get_investments',
+    description:
+      "Read the user's investment holdings live: total value, cost basis, unrealized gain and percent, each holding's value and gain, and the recorded balance trend over time. Use for any question about whether their investments are doing well, their returns, gains or losses, or a specific holding. Cost basis is provided by the bank and may be missing for some holdings, so the return can cover only part of the portfolio.",
+    input_schema: { type: 'object', properties: {} },
+  },
   { type: 'web_search_20250305', name: 'web_search', max_uses: 4 },
 ];
+
+/// Reads this user's investment holdings live from Plaid and works out the
+/// unrealized gain against cost basis, plus the recorded balance trend. This is
+/// the one thing balances alone cannot answer: "are my investments doing well".
+async function runInvestments(user) {
+  const items = await listItems(user);
+  const holdings = [];
+  let value = 0;
+  let costBasis = 0;
+  let valueWithBasis = 0; // value of only the holdings that report a cost basis
+
+  await Promise.all(
+    items.map(async (item) => {
+      try {
+        const out = await plaid('/investments/holdings/get', { access_token: item.access_token });
+        const securities = new Map((out.securities || []).map((s) => [s.security_id, s]));
+        for (const h of out.holdings || []) {
+          const v = Number(h.institution_value) || 0;
+          const cb = h.cost_basis == null ? null : Number(h.cost_basis);
+          value += v;
+          if (cb != null) {
+            costBasis += cb;
+            valueWithBasis += v;
+          }
+          const sec = securities.get(h.security_id) || {};
+          if (sec.is_cash_equivalent) continue; // cash sweep, not an investment return
+          holdings.push({
+            name: sec.name || sec.ticker_symbol || 'Holding',
+            ticker: sec.ticker_symbol || null,
+            value: round2(v),
+            cost_basis: cb == null ? null : round2(cb),
+            gain: cb == null ? null : round2(v - cb),
+            gain_pct: cb && cb > 0 ? Math.round(((v - cb) / cb) * 1000) / 10 : null,
+          });
+        }
+      } catch {
+        // A bank with no investment product, or one that needs extra consent,
+        // simply contributes nothing here.
+      }
+    })
+  );
+
+  holdings.sort((a, b) => (b.gain ?? -Infinity) - (a.gain ?? -Infinity));
+
+  // Balance trend from the recorded daily snapshots of investment accounts --
+  // the closest thing we have to "how much have they grown".
+  let trend = null;
+  try {
+    const rows = await fetch(
+      rest(`balance_snapshots?select=as_of,current&${forUser(user)}&type=eq.investment&order=as_of.asc&limit=4000`),
+      { headers: sbHeaders() }
+    ).then((r) => r.json());
+    const byDate = new Map();
+    for (const r of rows || []) byDate.set(r.as_of, (byDate.get(r.as_of) || 0) + (Number(r.current) || 0));
+    const dates = [...byDate.keys()].sort();
+    if (dates.length > 1) {
+      const first = dates[0];
+      const last = dates[dates.length - 1];
+      trend = {
+        from: first,
+        from_value: round2(byDate.get(first)),
+        to: last,
+        to_value: round2(byDate.get(last)),
+        days_recorded: dates.length,
+      };
+    }
+  } catch {
+    // Trend is a nicety; never fail the whole tool for it.
+  }
+
+  return {
+    total_value: round2(value),
+    cost_basis_covers_value: round2(valueWithBasis),
+    total_cost_basis: costBasis ? round2(costBasis) : null,
+    unrealized_gain: costBasis ? round2(valueWithBasis - costBasis) : null,
+    unrealized_gain_pct: costBasis > 0 ? Math.round(((valueWithBasis - costBasis) / costBasis) * 1000) / 10 : null,
+    holdings: holdings.slice(0, 25),
+    recorded_trend: trend,
+    note:
+      valueWithBasis < value - 1
+        ? 'Cost basis is missing for some holdings, so the gain figures cover only part of the portfolio.'
+        : null,
+  };
+}
+
+const round2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
 
 /// Reads this user's latest account balances and sums them into a plain
 /// summary the model can give advice from. Source is balance_snapshots (written
@@ -252,6 +346,22 @@ export default async function handler(req, res) {
                 type: 'tool_result',
                 tool_use_id: block.id,
                 content: `balances failed: ${err.message}`,
+                is_error: true,
+              });
+            }
+          } else if (block.name === 'get_investments') {
+            try {
+              const inv = await runInvestments(user);
+              results.push({
+                type: 'tool_result',
+                tool_use_id: block.id,
+                content: JSON.stringify(inv),
+              });
+            } catch (err) {
+              results.push({
+                type: 'tool_result',
+                tool_use_id: block.id,
+                content: `investments failed: ${err.message}`,
                 is_error: true,
               });
             }
