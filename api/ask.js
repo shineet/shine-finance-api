@@ -32,6 +32,9 @@ const SYSTEM = `You are the "Ask" assistant inside MyFinance, a personal finance
 You have tools that see their REAL financial data. Reach for them instead of giving generic answers:
 - get_balances: how much they have right now -- cash, credit-card debt, investments, net worth, available credit, and each account. Call this BEFORE giving any advice about what to do with cash, savings or debt, or any question about their overall position, so the answer fits their actual numbers.
 - get_investments: whether their investments are doing well -- total value, cost basis, unrealized gain and percent, each holding's gain, and the recorded balance trend. Use for any question about investment returns, performance, gains or losses, or a specific holding. Lead with the real gain or percent rather than generic market averages; mention the note if cost basis is only partial.
+- get_debt: credit-card debt with APR, minimum payment, due date and the avalanche payoff order. Use for paying down debt, which card first, payoff timelines, due dates or minimums. Quote the real APRs.
+- get_cashflow: monthly income, spending and surplus. Use for how much they earn or make, whether they spend more than they earn, or what is left over each month.
+- get_spending: spending broken down by category, optionally versus the previous period. Use for where their money goes, biggest expenses, spending on a category, or whether spending rose or fell.
 - search_transactions: what they bought, paid, earned or spent, or a specific charge. Amounts are signed: negative is money out (spending), positive is money in.
 - web_search: general knowledge the app does not hold (what a merchant or company is, e.g. "what is DistroKid"). If the name also appears in their transactions, you may search those too to tie it to a charge.
 
@@ -82,6 +85,30 @@ const TOOLS = [
     description:
       "Read the user's investment holdings live: total value, cost basis, unrealized gain and percent, each holding's value and gain, and the recorded balance trend over time. Use for any question about whether their investments are doing well, their returns, gains or losses, or a specific holding. Cost basis is provided by the bank and may be missing for some holdings, so the return can cover only part of the portfolio.",
     input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_debt',
+    description:
+      "Read the user's credit-card debt with the terms needed to plan payoff: each card's current balance, APR, minimum payment, due date and days until due, plus totals, the weighted-average APR, and the avalanche payoff order (highest APR first). Use for any question about paying down debt, which card to pay first, how long payoff will take, when a payment is due, or the minimum owed.",
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_cashflow',
+    description:
+      "Read the user's monthly money in versus out: regular income (from detected recurring deposits), average monthly spending and deposits over the last 90 days, and the estimated monthly surplus. Use for questions about how much they earn or make, whether they spend more than they earn, or what is left over each month.",
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_spending',
+    description:
+      "Break the user's spending down by category over a window, optionally compared with the previous equal-length period. Use for 'where does my money go', biggest expenses, how much on a category (dining, groceries, etc.), or whether spending went up or down. Transfers and card/loan payments are excluded.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        days: { type: 'integer', description: 'How many days back to total, 1 to 365. Default 30.' },
+        compare: { type: 'boolean', description: 'If true, also total the previous equal-length period for comparison. Default false.' },
+      },
+    },
   },
   { type: 'web_search_20250305', name: 'web_search', max_uses: 4 },
 ];
@@ -171,11 +198,221 @@ async function runInvestments(user) {
 }
 
 const round2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
+const isoDaysAgo = (n) => new Date(Date.now() - n * 864e5).toISOString().slice(0, 10);
+
+/// A card can carry several APRs; the purchase APR applies to a carried
+/// balance, so prefer it and fall back to the highest quoted.
+function primaryApr(aprs = []) {
+  const purchase = aprs.find((a) => a.apr_type === 'purchase_apr');
+  if (purchase?.apr_percentage != null) return purchase.apr_percentage;
+  const values = aprs.map((a) => a.apr_percentage).filter((v) => v != null);
+  return values.length ? Math.max(...values) : null;
+}
+
+/// Normalise a recurring stream to a monthly figure so cadences can be summed.
+function monthlyEquivalent(amount, frequency) {
+  const a = Math.abs(Number(amount) || 0);
+  switch ((frequency || 'MONTHLY').toUpperCase()) {
+    case 'WEEKLY': return (a * 52) / 12;
+    case 'BIWEEKLY': return (a * 26) / 12;
+    case 'SEMI_MONTHLY':
+    case 'SEMIMONTHLY': return a * 2;
+    case 'QUARTERLY': return a / 3;
+    case 'ANNUALLY':
+    case 'YEARLY': return a / 12;
+    default: return a;
+  }
+}
+
+/// Credit-card debt with the terms that turn a balance into a payoff plan:
+/// current balance (from the snapshot), APR, minimum payment and due date
+/// (live from Plaid's liabilities product), plus an avalanche payoff order.
+async function runDebt(user) {
+  const { rows: snap } = await latestSnapshots(user);
+  const cards = new Map(); // account_id -> card
+  for (const a of snap) {
+    if (a.type !== 'credit') continue;
+    cards.set(a.account_id, {
+      name: a.name,
+      institution: a.institution,
+      balance: round2(a.current),
+      limit: a.limit == null ? null : round2(a.limit),
+      apr: null,
+      minimum_payment: null,
+      due_date: null,
+      days_until_due: null,
+      last_statement_balance: null,
+      is_overdue: null,
+    });
+  }
+
+  const items = await listItems(user);
+  await Promise.all(
+    items.map(async (item) => {
+      try {
+        const out = await plaid('/liabilities/get', { access_token: item.access_token });
+        for (const card of out.liabilities?.credit || []) {
+          const c = cards.get(card.account_id) || {
+            name: null,
+            institution: item.institution_name || null,
+            balance: null,
+            limit: null,
+          };
+          c.apr = primaryApr(card.aprs);
+          c.minimum_payment = card.minimum_payment_amount ?? null;
+          c.due_date = card.next_payment_due_date ?? null;
+          c.last_statement_balance = card.last_statement_balance ?? null;
+          c.is_overdue = card.is_overdue ?? null;
+          if (c.due_date) {
+            c.days_until_due = Math.round((new Date(c.due_date) - new Date()) / 864e5);
+          }
+          cards.set(card.account_id, c);
+        }
+      } catch {
+        // A bank without the liabilities product simply adds no terms.
+      }
+    })
+  );
+
+  const list = [...cards.values()].sort((a, b) => (b.balance || 0) - (a.balance || 0));
+  const totalOwed = list.reduce((s, c) => s + (c.balance || 0), 0);
+  const totalMin = list.reduce((s, c) => s + (c.minimum_payment || 0), 0);
+  const withApr = list.filter((c) => c.apr != null && c.balance);
+  const aprBase = withApr.reduce((s, c) => s + c.balance, 0);
+  const weightedApr = aprBase > 0 ? Math.round((withApr.reduce((s, c) => s + c.apr * c.balance, 0) / aprBase) * 10) / 10 : null;
+  const payoffOrder = [...withApr]
+    .sort((a, b) => b.apr - a.apr)
+    .map((c) => ({ name: c.name, apr: c.apr, balance: c.balance }));
+
+  return {
+    cards: list,
+    total_owed: round2(totalOwed),
+    total_minimum_payment: round2(totalMin),
+    weighted_avg_apr: weightedApr,
+    payoff_order_highest_apr_first: payoffOrder,
+    note: withApr.length < list.length ? 'APR is missing for some cards (the bank did not report it), so the payoff order covers only the cards that have it.' : null,
+  };
+}
+
+/// Monthly money in versus out. Regular income is taken from Plaid's detected
+/// recurring deposits (salary), spending from the last 90 days of
+/// transactions. Both are approximate and labelled as such.
+async function runCashflow(user) {
+  // Regular income from recurring inflow streams.
+  let regularIncome = 0;
+  let hasRecurring = false;
+  const items = await listItems(user);
+  await Promise.all(
+    items.map(async (item) => {
+      try {
+        const out = await plaid('/transactions/recurring/get', { access_token: item.access_token });
+        for (const s of out.inflow_streams || []) {
+          if (s.is_active === false) continue;
+          hasRecurring = true;
+          regularIncome += monthlyEquivalent(s.average_amount?.amount, s.frequency);
+        }
+      } catch {
+        // No recurring product on this bank; fall back to transaction totals.
+      }
+    })
+  );
+
+  // Spending and all deposits over the last 90 days, averaged per month.
+  const since = isoDaysAgo(90);
+  const url =
+    rest(`plaid_transactions?select=date,amount,category&${forUser(user)}`) +
+    `&date=gte.${since}&order=date.desc&limit=5000`;
+  const r = await fetch(url, { headers: sbHeaders() });
+  if (!r.ok) throw new Error(await r.text());
+  const rows = await r.json();
+  const SKIP = new Set(['TRANSFER_IN', 'TRANSFER_OUT', 'LOAN_PAYMENTS']);
+  let out90 = 0;
+  let in90 = 0;
+  for (const t of rows) {
+    const amt = Number(t.amount) || 0;
+    if (SKIP.has(t.category)) continue; // moving your own money is not income or spending
+    if (amt < 0) out90 += -amt;
+    else in90 += amt;
+  }
+  const spendingPerMonth = round2(out90 / 3);
+  const depositsPerMonth = round2(in90 / 3);
+  const income = hasRecurring ? round2(regularIncome) : depositsPerMonth;
+
+  return {
+    regular_monthly_income: hasRecurring ? round2(regularIncome) : null,
+    all_deposits_per_month: depositsPerMonth,
+    spending_per_month: spendingPerMonth,
+    estimated_monthly_surplus: round2(income - spendingPerMonth),
+    income_basis: hasRecurring ? 'detected recurring deposits (salary)' : 'average of all deposits over 90 days',
+    window: 'spending and deposits averaged over the last 90 days; transfers between your own accounts and card/loan payments are excluded',
+  };
+}
+
+/// Spending grouped by category over a window, optionally compared with the
+/// previous equal-length window. Transfers and debt payments are excluded so
+/// the breakdown reflects actual outgoings.
+async function runSpending(user, input) {
+  const days = Math.min(Math.max(parseInt(input.days, 10) || 30, 1), 365);
+  const compare = !!input.compare;
+  const lookback = compare ? days * 2 : days;
+  const since = isoDaysAgo(lookback);
+  const boundary = isoDaysAgo(days);
+
+  const url =
+    rest(`plaid_transactions?select=date,name,amount,category,category_label&${forUser(user)}`) +
+    `&date=gte.${since}&amount=lt.0&order=date.desc&limit=5000`;
+  const r = await fetch(url, { headers: sbHeaders() });
+  if (!r.ok) throw new Error(await r.text());
+  const rows = await r.json();
+
+  const SKIP = new Set(['TRANSFER_IN', 'TRANSFER_OUT', 'LOAN_PAYMENTS']);
+  const cur = new Map();
+  const prev = new Map();
+  let curTotal = 0;
+  let prevTotal = 0;
+  for (const t of rows) {
+    if (SKIP.has(t.category)) continue;
+    const spend = Math.abs(Number(t.amount) || 0);
+    if (!spend) continue;
+    const label = t.category_label || t.category || 'Uncategorised';
+    if (t.date >= boundary) {
+      cur.set(label, (cur.get(label) || 0) + spend);
+      curTotal += spend;
+    } else if (compare) {
+      prev.set(label, (prev.get(label) || 0) + spend);
+      prevTotal += spend;
+    }
+  }
+
+  const categories = [...cur.entries()]
+    .map(([name, total]) => {
+      const row = { name, total: round2(total) };
+      if (compare) row.previous_period = round2(prev.get(name) || 0);
+      return row;
+    })
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 15);
+
+  const result = {
+    window_days: days,
+    total_spent: round2(curTotal),
+    categories,
+    excludes: 'transfers between your own accounts and card/loan payments',
+  };
+  if (compare) {
+    result.previous_period_days = days;
+    result.previous_total_spent = round2(prevTotal);
+  }
+  return result;
+}
 
 /// Reads this user's latest account balances and sums them into a plain
 /// summary the model can give advice from. Source is balance_snapshots (written
 /// on every app open), so it needs no live Plaid call. Scoped by forUser.
-async function runBalances(user) {
+/// The newest balance snapshot per account. The most recent snapshot date
+/// holds the live accounts' fresh balances; older dates also carry accounts
+/// that have since been re-linked or removed, so only today's rows are kept.
+async function latestSnapshots(user) {
   const url =
     rest(
       `balance_snapshots?select=account_id,institution,name,type,subtype,current,available,limit,as_of&${forUser(user)}`
@@ -183,10 +420,7 @@ async function runBalances(user) {
   const r = await fetch(url, { headers: sbHeaders() });
   if (!r.ok) throw new Error(await r.text());
   const all = await r.json();
-  if (!all.length) return { as_of: null, summary: null, accounts: [] };
-
-  // The most recent snapshot date holds the live accounts' fresh balances;
-  // older dates also carry accounts that have since been re-linked or removed.
+  if (!all.length) return { as_of: null, rows: [] };
   const newest = all[0].as_of;
   const seen = new Set();
   const rows = [];
@@ -195,6 +429,12 @@ async function runBalances(user) {
     seen.add(row.account_id);
     rows.push(row);
   }
+  return { as_of: newest, rows };
+}
+
+async function runBalances(user) {
+  const { as_of: newest, rows } = await latestSnapshots(user);
+  if (!rows.length) return { as_of: null, summary: null, accounts: [] };
 
   const num = (v) => (v == null ? null : Math.round(Number(v) * 100) / 100);
   const isDebt = (t) => t === 'credit' || t === 'loan';
@@ -364,6 +604,27 @@ export default async function handler(req, res) {
                 content: `investments failed: ${err.message}`,
                 is_error: true,
               });
+            }
+          } else if (block.name === 'get_debt') {
+            try {
+              const debt = await runDebt(user);
+              results.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(debt) });
+            } catch (err) {
+              results.push({ type: 'tool_result', tool_use_id: block.id, content: `debt failed: ${err.message}`, is_error: true });
+            }
+          } else if (block.name === 'get_cashflow') {
+            try {
+              const cf = await runCashflow(user);
+              results.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(cf) });
+            } catch (err) {
+              results.push({ type: 'tool_result', tool_use_id: block.id, content: `cashflow failed: ${err.message}`, is_error: true });
+            }
+          } else if (block.name === 'get_spending') {
+            try {
+              const sp = await runSpending(user, block.input || {});
+              results.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(sp) });
+            } catch (err) {
+              results.push({ type: 'tool_result', tool_use_id: block.id, content: `spending failed: ${err.message}`, is_error: true });
             }
           }
           // web_search is a server tool, run by Anthropic, not answered here.
