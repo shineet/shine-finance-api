@@ -593,6 +593,92 @@ async function runNetWorthTrend(user, input) {
   };
 }
 
+// ── Personalised starter questions (GET /api/ask) ───────────────────────────
+// Shown under the Ask box. Deterministic rules over the data we already hold,
+// so there is no model call and no token cost. The app keeps a static list as
+// a fallback if this returns nothing.
+
+const COMMON_MERCHANTS = [
+  'amazon', 'walmart', 'target', 'costco', 'uber', 'lyft', 'starbucks', 'mcdonald',
+  'netflix', 'spotify', 'apple', 'google', 'paypal', 'venmo', 'zelle', 'chase',
+  'wells fargo', 'bank of america', 'shell', 'exxon', 'chevron', 'kroger',
+  'whole foods', 'doordash', 'instacart', 'heb', 'h-e-b',
+];
+
+function cardLabel(c) {
+  const n = (c.institution || c.name || 'card').trim();
+  return /card/i.test(n) ? n : `${n} card`;
+}
+
+/// A short, name-like recurring merchant the user might want explained -- the
+/// "What is X?" starter. Skips big brands, numeric/reference strings and long
+/// all-caps bank descriptors.
+async function pickDistinctiveMerchant(user) {
+  const since = isoDaysAgo(45);
+  const url =
+    rest(`plaid_transactions?select=name,amount,date&${forUser(user)}`) +
+    `&amount=lt.0&date=gte.${since}&order=date.desc&limit=300`;
+  const r = await fetch(url, { headers: sbHeaders() });
+  if (!r.ok) return null;
+  const rows = await r.json();
+  const counts = new Map();
+  for (const t of rows) {
+    const raw = (t.name || '').trim();
+    if (!raw) continue;
+    const lower = raw.toLowerCase();
+    if (COMMON_MERCHANTS.some((c) => lower.includes(c))) continue;
+    if (/\d/.test(raw)) continue; // skip "VISAAUSTINBD3", refs, order numbers
+    const tokens = raw.split(/\s+/);
+    if (tokens.length > 2) continue;
+    if (raw.length < 4 || raw.length > 20) continue;
+    if (raw === raw.toUpperCase() && raw.length > 10) continue; // long bank descriptor
+    counts.set(raw, (counts.get(raw) || 0) + 1);
+  }
+  let best = null;
+  let bestN = 0;
+  for (const [name, n] of counts) if (n > bestN) { best = name; bestN = n; }
+  return best;
+}
+
+async function buildSuggestions(user) {
+  const picks = [];
+  const add = (s) => { if (s && !picks.includes(s)) picks.push(s); };
+
+  let rows = [];
+  try { rows = (await latestSnapshots(user)).rows; } catch {}
+  const cards = rows.filter((r) => r.type === 'credit');
+  const cardDebt = cards.reduce((s, c) => s + (Number(c.current) || 0), 0);
+  const cash = rows.filter((r) => r.type === 'depository').reduce((s, c) => s + (Number(c.current) || 0), 0);
+  const overLimit = cards.find((c) => c.limit != null && Number(c.current) > Number(c.limit));
+  const hasInvest = rows.some((r) => r.type === 'investment');
+
+  // Lead with whatever is most pressing in their actual numbers.
+  if (overLimit) add(`How do I pay off my ${cardLabel(overLimit)} fastest?`);
+  else if (cards.length > 1 && cardDebt > 0) add('Which card should I pay off first?');
+  else if (cardDebt > 0) add('How do I pay down my card debt fastest?');
+
+  if (hasInvest) add('Are my investments giving good returns?');
+  if (cash > 0 && cash > cardDebt) add('What should I do with my spare cash?');
+
+  try {
+    const merchant = await pickDistinctiveMerchant(user);
+    if (merchant) add(`What is ${merchant}?`);
+  } catch {}
+
+  add('What am I subscribed to?');
+  add('Where did my money go last month?');
+  add('Is my net worth going up?');
+
+  // Pad to four from neutral defaults if the user has little data yet.
+  for (const d of [
+    'How much did I spend on groceries last month?',
+    'Am I spending more than I earn?',
+    'What bills are coming up this week?',
+  ]) add(d);
+
+  return picks.slice(0, 4);
+}
+
 /// Reads this user's latest account balances and sums them into a plain
 /// summary the model can give advice from. Source is balance_snapshots (written
 /// on every app open), so it needs no live Plaid call. Scoped by forUser.
@@ -715,9 +801,22 @@ async function callAnthropic(messages) {
 }
 
 export default async function handler(req, res) {
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+  if (req.method !== 'POST' && req.method !== 'GET') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
   const user = await authorize(req, res);
   if (!user) return;
+
+  // GET returns the personalised starter questions. No model call, so it works
+  // even before the key is set, and never costs a token.
+  if (req.method === 'GET') {
+    try {
+      return res.status(200).json({ suggestions: await buildSuggestions(user) });
+    } catch (err) {
+      console.error('[ask] suggestions', err.message);
+      return res.status(200).json({ suggestions: [] }); // app falls back to its own defaults
+    }
+  }
 
   if (!process.env.ANTHROPIC_API_KEY) {
     return res.status(503).json({ error: 'Ask is not configured yet.' });
