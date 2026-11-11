@@ -187,7 +187,7 @@ async function callAnthropic(messages) {
       'anthropic-version': '2026-10-21',
       'content-type': 'application/json',
     },
-    body: JSON.stringify({ model: MODEL, max_tokens: 1024, system: SYSTEM, tools: TOOLS, messages }),
+    body: JSON.stringify({ model: MODEL, max_tokens: 2048, system: SYSTEM, tools: TOOLS, messages }),
   });
   if (!res.ok) throw new Error(`anthropic ${res.status}: ${await res.text()}`);
   return res.json();
@@ -208,10 +208,12 @@ export default async function handler(req, res) {
 
   const messages = [{ role: 'user', content: question }];
   const shown = new Map(); // transaction_id -> full row, in search order
+  let nudged = false;      // whether we've already asked it to summarise
 
   try {
     for (let turn = 0; turn < MAX_TURNS; turn++) {
       const reply = await callAnthropic(messages);
+      console.log('[ask] turn', turn, reply.stop_reason, reply.content.map((b) => b.type).join('|'));
       messages.push({ role: 'assistant', content: reply.content });
 
       if (reply.stop_reason === 'tool_use') {
@@ -273,6 +275,19 @@ export default async function handler(req, res) {
         .map((b) => b.text)
         .join('')
         .trim();
+
+      // It gathered data but wrote no conclusion -- e.g. the previous turn was
+      // truncated mid-tool-call. Ask once for a plain summary rather than
+      // showing "could not find an answer" on top of a full data pull.
+      if (!answer && !nudged) {
+        nudged = true;
+        messages.push({
+          role: 'user',
+          content:
+            'Answer my question now in a few plain sentences, using what you already found. Do not call any more tools.',
+        });
+        continue;
+      }
 
       const sources = [];
       for (const b of reply.content) {
