@@ -35,6 +35,9 @@ You have tools that see their REAL financial data. Reach for them instead of giv
 - get_debt: credit-card debt with APR, minimum payment, due date and the avalanche payoff order. Use for paying down debt, which card first, payoff timelines, due dates or minimums. Quote the real APRs.
 - get_cashflow: monthly income, spending and surplus. Use for how much they earn or make, whether they spend more than they earn, or what is left over each month.
 - get_spending: spending broken down by category, optionally versus the previous period. Use for where their money goes, biggest expenses, spending on a category, or whether spending rose or fell.
+- get_subscriptions: recurring charges and subscriptions, with the monthly total and any that went up. Use for what they are subscribed to, recurring charges, or finding things to cancel.
+- get_bills: money due soon (card due dates and recurring bills within a window). Use for what is due, upcoming bills, next payment, or whether they can cover what is due before payday.
+- get_net_worth_trend: how net worth has changed over time. Use for whether it is going up, how it changed over a period, or progress.
 - search_transactions: what they bought, paid, earned or spent, or a specific charge. Amounts are signed: negative is money out (spending), positive is money in.
 - web_search: general knowledge the app does not hold (what a merchant or company is, e.g. "what is DistroKid"). If the name also appears in their transactions, you may search those too to tie it to a charge.
 
@@ -107,6 +110,34 @@ const TOOLS = [
       properties: {
         days: { type: 'integer', description: 'How many days back to total, 1 to 365. Default 30.' },
         compare: { type: 'boolean', description: 'If true, also total the previous equal-length period for comparison. Default false.' },
+      },
+    },
+  },
+  {
+    name: 'get_subscriptions',
+    description:
+      "List the user's recurring charges and subscriptions: each one's typical amount, how often it recurs, when it is next due, and whether the latest charge went up, plus the total per month. Use for 'what am I subscribed to', 'what recurring charges do I have', 'did a subscription go up', or finding things to cancel.",
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_bills',
+    description:
+      "List money going out soon: credit-card payment due dates (with the minimum) and recurring bills predicted to hit within the next N days (default 14), sorted by date, with a total. Use for 'what's due', 'what bills are coming up', 'when is my next payment', or 'do I have enough before payday'.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        days: { type: 'integer', description: 'How many days ahead to look, 1 to 90. Default 14.' },
+      },
+    },
+  },
+  {
+    name: 'get_net_worth_trend',
+    description:
+      "Read how the user's net worth has changed over time from recorded daily snapshots: the starting and latest value, the change and percent, and a sampled series. Net worth is all assets (cash, investments) minus all debts (cards, loans). Use for 'is my net worth going up', 'how has it changed this year', or progress over a period. Only covers the period since snapshots began.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        days: { type: 'integer', description: 'How many days back to look, 7 to 1095. Default 180.' },
       },
     },
   },
@@ -406,6 +437,162 @@ async function runSpending(user, input) {
   return result;
 }
 
+/// Active recurring outflow streams from Plaid (subscriptions and bills), each
+/// normalised to a monthly figure, with a flag when the last charge was higher
+/// than its usual amount. Shared by get_subscriptions and get_bills.
+async function fetchRecurringOutflows(user) {
+  const items = await listItems(user);
+  const streams = [];
+  await Promise.all(
+    items.map(async (item) => {
+      try {
+        const r = await plaid('/transactions/recurring/get', { access_token: item.access_token });
+        for (const s of r.outflow_streams || []) {
+          if (s.is_active === false) continue;
+          const avg = Math.abs(s.average_amount?.amount ?? 0);
+          const last = Math.abs(s.last_amount?.amount ?? 0);
+          streams.push({
+            name: s.merchant_name || s.description || 'Recurring charge',
+            average: round2(avg),
+            last_amount: round2(last),
+            monthly: round2(monthlyEquivalent(avg, s.frequency)),
+            frequency: s.frequency || null,
+            next_date: s.predicted_next_date || null,
+            category: s.personal_finance_category?.primary || null,
+            went_up: avg > 0 && last > avg * 1.05,
+          });
+        }
+      } catch {
+        // No recurring product on this bank; it simply adds nothing.
+      }
+    })
+  );
+  return streams;
+}
+
+/// What the user is subscribed to / pays on a schedule.
+async function runSubscriptions(user) {
+  const streams = await fetchRecurringOutflows(user);
+  streams.sort((a, b) => b.monthly - a.monthly);
+  const totalMonthly = streams.reduce((s, x) => s + (x.monthly || 0), 0);
+  return {
+    count: streams.length,
+    total_monthly: round2(totalMonthly),
+    recurring_charges: streams.slice(0, 40),
+    recently_went_up: streams
+      .filter((s) => s.went_up)
+      .map((s) => ({ name: s.name, average: s.average, last_amount: s.last_amount })),
+    note: streams.length
+      ? null
+      : 'No recurring charges were detected. This bank plan may not provide recurring-transaction data.',
+  };
+}
+
+/// Money going out in the near future: card payment due dates plus recurring
+/// bills predicted to hit within the window.
+async function runBills(user, input) {
+  const days = Math.min(Math.max(parseInt(input.days, 10) || 14, 1), 90);
+  const horizon = isoDaysAgo(-days); // today + days
+  const today = isoDaysAgo(0);
+  const upcoming = [];
+
+  try {
+    const debt = await runDebt(user);
+    for (const c of debt.cards) {
+      if (!c.due_date) continue;
+      if (c.due_date <= horizon && (c.days_until_due == null || c.days_until_due >= -5)) {
+        upcoming.push({
+          date: c.due_date,
+          name: `${c.name || c.institution || 'Card'} payment`,
+          amount: c.minimum_payment,
+          kind: 'card minimum payment',
+          days_until: c.days_until_due,
+          overdue: !!c.is_overdue,
+        });
+      }
+    }
+  } catch {
+    // Liabilities unavailable; recurring bills below still populate the list.
+  }
+
+  try {
+    const streams = await fetchRecurringOutflows(user);
+    for (const s of streams) {
+      if (s.next_date && s.next_date >= today && s.next_date <= horizon) {
+        upcoming.push({
+          date: s.next_date,
+          name: s.name,
+          amount: s.last_amount || s.average,
+          kind: 'recurring bill',
+          days_until: Math.round((new Date(s.next_date) - new Date()) / 864e5),
+          category: s.category,
+        });
+      }
+    }
+  } catch {
+    // Recurring unavailable; card dues above still populate the list.
+  }
+
+  upcoming.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  const total = upcoming.reduce((s, x) => s + (Number(x.amount) || 0), 0);
+  return {
+    window_days: days,
+    items: upcoming.slice(0, 40),
+    total_due: round2(total),
+    note: 'Card amounts are the minimum payment; recurring amounts are the last or typical charge. Both are estimates.',
+  };
+}
+
+/// Net worth over time from the recorded daily snapshots. Net worth is all
+/// assets (cash, investments) minus all debts (cards, loans), consistent with
+/// get_balances. Only covers the period since snapshots began.
+async function runNetWorthTrend(user, input) {
+  const days = Math.min(Math.max(parseInt(input.days, 10) || 180, 7), 1095);
+  const since = isoDaysAgo(days);
+  const url =
+    rest(`balance_snapshots?select=as_of,type,current&${forUser(user)}`) +
+    `&as_of=gte.${since}&order=as_of.asc&limit=20000`;
+  const r = await fetch(url, { headers: sbHeaders() });
+  if (!r.ok) throw new Error(await r.text());
+  const rows = await r.json();
+
+  const isDebt = (t) => t === 'credit' || t === 'loan';
+  const byDate = new Map();
+  for (const row of rows) {
+    const d = row.as_of;
+    if (!byDate.has(d)) byDate.set(d, { assets: 0, debts: 0 });
+    const b = byDate.get(d);
+    const v = Number(row.current) || 0;
+    if (isDebt(row.type)) b.debts += v;
+    else b.assets += v;
+  }
+
+  const series = [...byDate.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .map(([date, b]) => ({ date, net: round2(b.assets - b.debts) }));
+  if (!series.length) return { days_recorded: 0, note: 'No balance history recorded yet.' };
+
+  const first = series[0];
+  const last = series[series.length - 1];
+  const change = round2(last.net - first.net);
+  const changePct = first.net ? Math.round((change / Math.abs(first.net)) * 1000) / 10 : null;
+
+  // Downsample to ~10 points so the model can describe the shape cheaply.
+  const step = Math.max(1, Math.floor(series.length / 10));
+  const sampled = series.filter((_, i) => i % step === 0);
+  if (sampled[sampled.length - 1].date !== last.date) sampled.push(last);
+
+  return {
+    days_recorded: series.length,
+    from: first,
+    to: last,
+    change,
+    change_pct: changePct,
+    series: sampled,
+    note: series.length < 2 ? 'Only one day of history so far; the trend needs more days to be meaningful.' : null,
+  };
+}
+
 /// Reads this user's latest account balances and sums them into a plain
 /// summary the model can give advice from. Source is balance_snapshots (written
 /// on every app open), so it needs no live Plaid call. Scoped by forUser.
@@ -625,6 +812,27 @@ export default async function handler(req, res) {
               results.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(sp) });
             } catch (err) {
               results.push({ type: 'tool_result', tool_use_id: block.id, content: `spending failed: ${err.message}`, is_error: true });
+            }
+          } else if (block.name === 'get_subscriptions') {
+            try {
+              const subs = await runSubscriptions(user);
+              results.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(subs) });
+            } catch (err) {
+              results.push({ type: 'tool_result', tool_use_id: block.id, content: `subscriptions failed: ${err.message}`, is_error: true });
+            }
+          } else if (block.name === 'get_bills') {
+            try {
+              const bills = await runBills(user, block.input || {});
+              results.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(bills) });
+            } catch (err) {
+              results.push({ type: 'tool_result', tool_use_id: block.id, content: `bills failed: ${err.message}`, is_error: true });
+            }
+          } else if (block.name === 'get_net_worth_trend') {
+            try {
+              const trend = await runNetWorthTrend(user, block.input || {});
+              results.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(trend) });
+            } catch (err) {
+              results.push({ type: 'tool_result', tool_use_id: block.id, content: `net worth trend failed: ${err.message}`, is_error: true });
             }
           }
           // web_search is a server tool, run by Anthropic, not answered here.
