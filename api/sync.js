@@ -11,6 +11,7 @@ import { isEntitled } from '../lib/entitlement.js';
 import { syncItem } from '../lib/sync.js';
 import { sbHeaders, rest, forUser } from '../lib/db.js';
 import { announceDeposits } from '../lib/deposits.js';
+import { announceUnusualCharges } from '../lib/alerts.js';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
@@ -68,6 +69,8 @@ export default async function handler(req, res) {
         // Plaid's webhook arrives; it announces it the same way.
         try { await announceDeposits(item, result); }
         catch (e) { console.error(`[deposits] ${institution}: ${e.message}`); }
+        try { await announceUnusualCharges(item, result); }
+        catch (e) { console.error(`[alerts] ${institution}: ${e.message}`); }
       } catch (err) {
         // Loudly. A caught error that is only returned in a body nobody reads
         // is indistinguishable from no error at all.

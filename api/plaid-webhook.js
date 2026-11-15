@@ -21,6 +21,7 @@ import crypto from 'node:crypto';
 import { plaid, authorize, listItems, itemById, isSandboxToken } from '../lib/plaid.js';
 import { syncItem } from '../lib/sync.js';
 import { announceDeposits } from '../lib/deposits.js';
+import { announceUnusualCharges } from '../lib/alerts.js';
 import { pushAll } from '../lib/push.js';
 import { applyNotification, isEntitled } from '../lib/entitlement.js';
 import { sweepLapsed } from '../lib/lapse.js';
@@ -172,6 +173,8 @@ export default async function handler(req, res) {
     }
     const result = await syncItem(item);
     const sent = await announceDeposits(item, result);
+    try { await announceUnusualCharges(item, result); }
+    catch (e) { console.error(`[alerts] ${e.message}`); }
     return res.status(200).json({ synced: result.upserts.length, notified: sent });
   } catch (err) {
     console.error(`[webhook] sync failed: ${err.message}`);
