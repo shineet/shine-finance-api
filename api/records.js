@@ -72,7 +72,7 @@ async function history(req, res) {
 }
 
 // ── /api/transactions ───────────────────────────────────────────────────────
-// GET /api/transactions?days=90&limit=500&q=term1,term2
+// GET /api/transactions?days=90&limit=500&q=term1,term2&to=YYYY-MM-DD
 // Serves stored transactions, newest first. Reads Supabase rather than Plaid,
 // so this stays fast and works even if an institution is temporarily down.
 // /api/sync is what refreshes the store.
@@ -93,6 +93,11 @@ async function transactions(req, res) {
   since.setDate(since.getDate() - days);
   const sinceStr = since.toISOString().slice(0, 10);
 
+  // Optional upper bound (YYYY-MM-DD, exclusive): lets the app read a long
+  // history in slices that each stay under the row limit.
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to || '') ? req.query.to : '';
+  const toFilter = to ? `&date=lt.${to}` : '';
+
   // Optional name filter: comma-separated terms, matched case-insensitively.
   const q = (req.query.q || '').trim();
   const terms = q ? q.split(',').map((t) => t.trim()).filter(Boolean).slice(0, 12) : [];
@@ -105,7 +110,7 @@ async function transactions(req, res) {
   try {
     const url =
       rest(`plaid_transactions?select=transaction_id,account_id,institution,date,name,amount,currency,pending,category,category_label,channel&${forUser(user)}`) +
-      `&date=gte.${sinceStr}${nameFilter}&order=date.desc&limit=${limit}`;
+      `&date=gte.${sinceStr}${toFilter}${nameFilter}&order=date.desc&limit=${limit}`;
 
     const r = await fetch(url, { headers: sbHeaders() });
     if (!r.ok) throw new Error(await r.text());
