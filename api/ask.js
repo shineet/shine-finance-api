@@ -1,4 +1,5 @@
-// POST /api/ask  { "question": "did I buy anything on Amazon in the last 2 weeks?" }
+// POST /api/ask  { "question": "did I buy anything on Amazon in the last 2 weeks?", "history": [{role, content}, ...] }
+//   `history` is optional: the recent turns of the conversation, kept by the app (nothing is stored here).
 //
 // The "Ask" feature: a question in plain English about the signed-in user's own
 // money, answered by Claude. Two tools are available to it:
@@ -22,12 +23,19 @@
 import { authorize } from '../lib/auth.js';
 import { plaid, listItems } from '../lib/plaid.js';
 import { sbHeaders, rest, forUser } from '../lib/db.js';
+import { cleanHistory, splitFollowups } from '../lib/askHistory.js';
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const MODEL = process.env.ASK_MODEL || 'claude-sonnet-5-5';
 const MAX_TURNS = 6;
 
 const SYSTEM = `You are the "Ask" assistant inside MyFinance, a personal finance app. You answer questions about the signed-in person's own money, in a warm, plain, concise way. Today is ${new Date().toISOString().slice(0, 10)}.
+
+The conversation may include earlier questions and answers. A follow-up such as "and the month before?" or "which of those was biggest?" refers to them, so use what was already said for what "that" means, but still call your tools for the figures themselves, which may have changed.
+
+After your answer, on a new final line, add up to three short follow-up questions the person might ask next, in exactly this form (no other text on that line):
+FOLLOWUPS: first question | second question | third question
+Make each under 60 characters, phrased as the person would say it. Leave the line out when there is nothing natural to ask.
 
 You have tools that see their REAL financial data. Reach for them instead of giving generic answers:
 - get_balances: how much they have right now -- cash, credit-card debt, investments, net worth, available credit, and each account. Call this BEFORE giving any advice about what to do with cash, savings or debt, or any question about their overall position, so the answer fits their actual numbers.
@@ -826,7 +834,8 @@ export default async function handler(req, res) {
   if (!question) return res.status(400).json({ error: 'Ask a question.' });
   if (question.length > 1000) return res.status(400).json({ error: 'That question is too long.' });
 
-  const messages = [{ role: 'user', content: question }];
+  // Earlier turns, kept by the app, come first. Stateless here: nothing is stored.
+  const messages = [...cleanHistory(req.body?.history), { role: 'user', content: question }];
   const shown = new Map(); // transaction_id -> full row, in search order
   let nudged = false;      // whether we've already asked it to summarise
 
@@ -975,7 +984,13 @@ export default async function handler(req, res) {
       }
 
       const transactions = [...shown.values()].slice(0, 25);
-      return res.status(200).json({ answer: answer || "I could not find an answer to that.", sources, transactions });
+      const split = splitFollowups(answer);
+      return res.status(200).json({
+        answer: split.answer || "I could not find an answer to that.",
+        followups: split.followups,
+        sources,
+        transactions,
+      });
     }
 
     return res.status(200).json({
