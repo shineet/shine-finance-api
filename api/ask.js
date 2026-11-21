@@ -794,7 +794,14 @@ async function runSearch(user, input) {
   return { rows, compact };
 }
 
-async function callAnthropic(messages) {
+// Added to the instructions when the question was SAID aloud: the answer will be read out, so it
+// must be short, plain and speakable. The app also shortens what it speaks; this makes the answer
+// itself suit the ear rather than relying on a cut.
+const SPOKEN_NOTE = `
+
+This question was spoken aloud and your answer will be read out loud. Answer in at most three short sentences of plain speech: no lists, no markdown, no symbols, no tables, and say amounts the way a person would ("about two hundred dollars"). If the full answer needs a list of transactions, give the headline in words and say the details are on screen. Still add the FOLLOWUPS line.`;
+
+async function callAnthropic(messages, spoken = false) {
   const res = await fetch(ANTHROPIC_URL, {
     method: 'POST',
     headers: {
@@ -802,7 +809,7 @@ async function callAnthropic(messages) {
       'anthropic-version': '2026-10-21',
       'content-type': 'application/json',
     },
-    body: JSON.stringify({ model: MODEL, max_tokens: 2048, system: SYSTEM, tools: TOOLS, messages }),
+    body: JSON.stringify({ model: MODEL, max_tokens: 2048, system: spoken ? SYSTEM + SPOKEN_NOTE : SYSTEM, tools: TOOLS, messages }),
   });
   if (!res.ok) throw new Error(`anthropic ${res.status}: ${await res.text()}`);
   return res.json();
@@ -834,6 +841,9 @@ export default async function handler(req, res) {
   if (!question) return res.status(400).json({ error: 'Ask a question.' });
   if (question.length > 1000) return res.status(400).json({ error: 'That question is too long.' });
 
+  // True when the app took the question by voice: the answer will be spoken, so it is asked to be short.
+  const spoken = req.body?.spoken === true;
+
   // Earlier turns, kept by the app, come first. Stateless here: nothing is stored.
   const messages = [...cleanHistory(req.body?.history), { role: 'user', content: question }];
   const shown = new Map(); // transaction_id -> full row, in search order
@@ -841,7 +851,7 @@ export default async function handler(req, res) {
 
   try {
     for (let turn = 0; turn < MAX_TURNS; turn++) {
-      const reply = await callAnthropic(messages);
+      const reply = await callAnthropic(messages, spoken);
       console.log('[ask] turn', turn, reply.stop_reason, reply.content.map((b) => b.type).join('|'));
       messages.push({ role: 'assistant', content: reply.content });
 
