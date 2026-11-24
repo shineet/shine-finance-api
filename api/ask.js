@@ -799,7 +799,7 @@ async function runSearch(user, input) {
 // itself suit the ear rather than relying on a cut.
 const SPOKEN_NOTE = `
 
-This question was spoken aloud and your answer will be read out loud. Answer in at most three short sentences of plain speech: no lists, no markdown, no symbols, no tables, and say amounts the way a person would ("about two hundred dollars"). If the full answer needs a list of transactions, give the headline in words and say the details are on screen. Still add the FOLLOWUPS line.`;
+This question was spoken aloud and your answer will be read out loud by a voice, in a back and forth conversation. Talk the way a person would across a table. Lead with the answer. One to three short sentences, each one idea. Use contractions. No lists, no markdown, no tables, no headings, no brackets, no dashes, no abbreviations: write "about two hundred dollars", "a month", "December twelfth", "interest rate". Round amounts unless the exact figure was asked for. Do not repeat the question, and do not open with filler such as "great question" or "based on your data". If the full answer is a list of transactions, give the headline and say the details are on screen. Earlier turns are part of the same conversation, so "what about last month" or "and that one" refers back to them. If what was heard makes no sense, say what you understood and ask one short question. Still add the FOLLOWUPS line.`;
 
 async function callAnthropic(messages, spoken = false) {
   const res = await fetch(ANTHROPIC_URL, {
