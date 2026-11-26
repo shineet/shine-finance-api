@@ -893,7 +893,7 @@ Clickable elements:\n${lines.join('\n')}`;
   }
   const option = action === 'choose' && typeof j.option === 'string' ? j.option.slice(0, 80) : null;
   let host = ''; try { host = new URL(String(page.url || '')).host; } catch {}
-  const label = id === null ? '' : String(els.find((e) => Number(e.id) === id)?.text || '').slice(0, 60);
+  const label = id === null ? '' : String(els.find((e) => Number(e.id) === id)?.text || '').replace(/[^\s@]+@[^\s@]+/g, '[email]').slice(0, 60);
   console.log('[cancel_step]', JSON.stringify({ host, action, label, why: String(j.why || '').slice(0, 80), step: (b.history || []).length, elements: els.length, password: !!page.hasPassword }));
   return { action, id, option, say: typeof j.say === 'string' ? j.say.slice(0, 240) : '', why: typeof j.why === 'string' ? j.why.slice(0, 120) : '' };
 }
