@@ -104,6 +104,11 @@ export default async function handler(req, res) {
     });
   } catch (err) {
     console.error('link-token failed:', err.plaidCode || '(no code)', err.message);
-    return res.status(err.status || 500).json({ error: err.message, code: err.plaidCode });
+    // A setup problem on our side (Plaid dashboard, products) is not the person's to fix: say so plainly.
+    const ours = /INVALID_LINK_CUSTOMIZATION|INVALID_PRODUCT|INVALID_API_KEYS|UNAUTHORIZED_ENVIRONMENT/.test(err.plaidCode || '');
+    return res.status(err.status || 500).json({
+      error: ours ? 'Bank linking is not available right now. We have been told; please try again later.' : err.message,
+      code: err.plaidCode,
+    });
   }
 }
