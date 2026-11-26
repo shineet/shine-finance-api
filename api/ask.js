@@ -23,6 +23,7 @@
 import { authorize } from '../lib/auth.js';
 import { plaid, listItems } from '../lib/plaid.js';
 import { sbHeaders, rest, forUser } from '../lib/db.js';
+import { loadDetected } from '../lib/detected.js';
 import { cleanHistory, splitFollowups } from '../lib/askHistory.js';
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
@@ -478,23 +479,37 @@ async function fetchRecurringOutflows(user) {
   return streams;
 }
 
-/// What the user is subscribed to / pays on a schedule.
+/// What the user is subscribed to: found in their own transactions (a steady
+/// price on a steady schedule, still charged), the same list as the app's
+/// Subscriptions screen. Bills are listed apart, never mixed in.
 async function runSubscriptions(user) {
-  const streams = await fetchRecurringOutflows(user);
-  streams.sort((a, b) => b.monthly - a.monthly);
-  const totalMonthly = streams.reduce((s, x) => s + (x.monthly || 0), 0);
+  const all = await loadDetected(user);
+  const shape = (s) => ({
+    name: s.description,
+    amount: s.average_amount,
+    frequency: s.frequency,
+    monthly: round2(monthlyOf(s)),
+    last_paid: s.last_date,
+    next_date: s.is_active ? s.predicted_next_date : null,
+    since: s.first_date,
+    times_charged: s.charges.length,
+    price_change: s.price_change,
+  });
+  const subs = all.filter((s) => s.kind === 'subscription' && s.is_active).map(shape).sort((a, b) => b.monthly - a.monthly);
+  const bills = all.filter((s) => s.kind === 'bill' && s.is_active).map(shape).sort((a, b) => b.monthly - a.monthly);
+  const stopped = all.filter((s) => s.kind === 'subscription' && !s.is_active).map((s) => ({ name: s.description, amount: s.average_amount, last_paid: s.last_date }));
   return {
-    count: streams.length,
-    total_monthly: round2(totalMonthly),
-    recurring_charges: streams.slice(0, 40),
-    recently_went_up: streams
-      .filter((s) => s.went_up)
-      .map((s) => ({ name: s.name, average: s.average, last_amount: s.last_amount })),
-    note: streams.length
-      ? null
-      : 'No recurring charges were detected. This bank plan may not provide recurring-transaction data.',
+    count: subs.length,
+    total_monthly: round2(subs.reduce((t, x) => t + x.monthly, 0)),
+    subscriptions: subs.slice(0, 50),
+    bills_not_subscriptions: bills.slice(0, 30),
+    stopped_recently: stopped.slice(0, 20),
+    recently_went_up: subs.filter((s) => s.price_change).map((s) => ({ name: s.name, from: s.price_change.from, to: s.price_change.to, on: s.price_change.on })),
+    note: subs.length ? 'Found in their transactions: the same company, about the same price, on a steady schedule. Bills (mortgage, loans, utilities, phone, insurance, tuition) are listed apart.' : 'No subscriptions were found in their transactions.',
   };
 }
+
+const monthlyOf = (s) => s.average_amount * ({ WEEKLY: 52 / 12, BIWEEKLY: 26 / 12, MONTHLY: 1, QUARTERLY: 1 / 3, SEMI_ANNUALLY: 1 / 6, ANNUALLY: 1 / 12 }[s.frequency] ?? 1);
 
 /// Money going out in the near future: card payment due dates plus recurring
 /// bills predicted to hit within the window.
@@ -524,7 +539,14 @@ async function runBills(user, input) {
   }
 
   try {
-    const streams = await fetchRecurringOutflows(user);
+    let streams = await fetchRecurringOutflows(user);
+    // The banks' own detection said nothing: use what the transactions show.
+    if (!streams.length) {
+      streams = (await loadDetected(user)).filter((s) => s.is_active).map((s) => ({
+        name: s.description, average: s.average_amount, last_amount: s.last_amount,
+        next_date: s.predicted_next_date, category: s.category,
+      }));
+    }
     for (const s of streams) {
       if (s.next_date && s.next_date >= today && s.next_date <= horizon) {
         upcoming.push({
