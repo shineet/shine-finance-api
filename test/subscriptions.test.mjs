@@ -76,6 +76,12 @@ check('Tesla autopay is not', !isMovement('TESLA AUTOPAY', 'LOAN_PAYMENTS'));
 rows = [0, 1, 2, 3].map((n) => tx(month(n), 'CHASE CREDIT CRD AUTOPAY', 1200, { category: 'LOAN_PAYMENTS' }));
 check('card payments never listed', detect(rows, { today }).length === 0);
 
+// Billed by use: one subscription, still going, whatever the amount does
+rows = [5, 4, 3, 2, 1, 0].map((n, i) => tx(month(n, 2), 'Fly.io', [26.5, 26.5, 26.5, 28.1, 26.5, 31.29][i]));
+f = detect(rows, { today });
+check('usage billing is one subscription, still going', f.length === 1 && f[0].is_active && f[0].charges.length === 6, JSON.stringify(f.map((s) => [s.average_amount, s.is_active, s.charges.length])));
+check('Apple Card payment is movement', isMovement('Apple Card', 'LOAN_PAYMENTS') && isMovement('APPLECARD GSBANK PAYMENT', null));
+
 // Names
 check('PayPal prefix', merchantKey('PAYPAL *NETFLIX') === merchantKey('Netflix'), merchantKey('PAYPAL *NETFLIX'));
 check('store numbers', merchantKey('SQ *OIL CHANGERS #123') === merchantKey('Oil Changers'), merchantKey('SQ *OIL CHANGERS #123'));
