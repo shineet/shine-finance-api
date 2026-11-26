@@ -839,6 +839,7 @@ Actions:
 - "done": the page says the subscription is cancelled or will end. Put the end date in "say" if shown.
 - "failed": you cannot find a way after trying; say what you saw.
 You have no tools: never write tool calls, only the JSON object.
+Never close a menu or sidebar that may hold the account or settings link; open it instead.
 Rules: never buy, upgrade, switch plan, pause instead of cancel, accept an offer or discount, change payment details, or delete the account. Decline offers to stay by choosing the option that continues cancelling. Never type anything. Do not repeat a click that did not change the page; try another way or say failed. If the page is not the right company or account, use need_user.
 If the subscription is billed by Apple, Google or PayPal (the page says so, or says to cancel in the App Store), use need_user and say where to cancel.
 Reply with ONLY one JSON object: {"action": "...", "id": number or null, "option": "for choose only", "say": "one short sentence for the user", "why": "a few words"}`;
@@ -863,7 +864,7 @@ Clickable elements:\n${lines.join('\n')}`;
     const res = await fetch(ANTHROPIC_URL, {
       method: 'POST',
       headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2026-10-21', 'content-type': 'application/json' },
-      body: JSON.stringify({ model: MODEL, max_tokens: 400, system: CANCEL_AGENT, messages: [{ role: 'user', content: content + extra }] }),
+      body: JSON.stringify({ model: MODEL, max_tokens: 2048, system: CANCEL_AGENT, messages: [{ role: 'user', content: content + extra }] }),
     });
     if (!res.ok) throw new Error(`anthropic ${res.status}: ${await res.text()}`);
     const out = await res.json();
