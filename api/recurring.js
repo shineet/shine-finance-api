@@ -9,6 +9,7 @@
 import { plaid, authorize, listItems } from '../lib/plaid.js';
 import { sbHeaders, rest, forUser } from '../lib/db.js';
 import { detect, explain } from '../lib/subscriptions.js';
+import { identify } from '../lib/merchants.js';
 import { allRows } from '../lib/detected.js';
 
 
@@ -127,7 +128,7 @@ export default async function handler(req, res) {
     let subscriptionsError = null;
     try {
       const rows = await allRows(user, 'transaction_id,account_id,institution,date,name,amount,category,pending', 760);
-      subscriptions = detect(rows);
+      subscriptions = identify(detect(rows));
       try { for (const e of explain(rows, subscriptions)) console.log('[subs-explain]', JSON.stringify(e)); } catch {}
       // Nothing came back from Plaid at all: what was found here is the
       // planner's bills, and income is inferred from the same rows.
@@ -137,7 +138,7 @@ export default async function handler(req, res) {
         for (const s of inferStreams(year)) if (s.direction === 'inflow') inflows.push(s);
         for (const s of subscriptions) {
           if (!s.is_active) continue;
-          const { charges, kind, first_date, price_change, institution, ...stream } = s;
+          const { charges, kind, first_date, price_change, institution, known_as, about, ...stream } = s;
           outflows.push({ ...stream, id: s.id });
         }
       }

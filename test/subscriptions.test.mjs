@@ -1,4 +1,5 @@
 // node test/subscriptions.test.mjs
+import { identify } from '../lib/merchants.js';
 import { detect, merchantKey, isMovement, kindOf, dedupe, cadenceOf, monthly } from '../lib/subscriptions.js';
 
 let ok = 0, bad = 0;
@@ -107,7 +108,19 @@ rows = [tx('2026-10-29', '24 Hour Fitness', 3.79), tx('2026-11-23', '24 Hour Fit
 check('two charges at different prices are not a subscription', detect(rows, { today }).length === 0);
 // Two charges a month apart but long overdue: not enough
 rows = [tx('2026-08-14', 'Anthropic', 10.78), tx('2026-09-14', 'Anthropic', 10.78)];
-check('an overdue pair is not a subscription', detect(rows, { today }).length === 0);
+check('an overdue pair is not counted as going', detect(rows, { today }).every((s) => !s.is_active));
+
+// What it probably is
+f = identify(detect([6, 5].map((n) => tx(month(n, 15), 'ExpressVPN', 12.95)).concat([2, 1, 0].map((n) => tx(month(n, 15), 'Expressco', 12.95))), { today }));
+const ex = f.find((s) => s.description === 'Expressco');
+check('Expressco is ExpressVPN', ex?.known_as === 'ExpressVPN', JSON.stringify(ex));
+f = identify(detect([3, 4].map((n) => tx(month(n, 24), 'YouTube', 29.22)).concat([0, 1, 2].map((n) => tx(month(n, 25), 'Google', 29.22))), { today }));
+const g = f.find((s) => s.description === 'Google');
+check('Google after YouTube is YouTube Premium', g?.known_as === 'YouTube Premium' && /YouTube/.test(g.about), JSON.stringify(g));
+f = identify(detect([0, 1, 2].map((n) => tx(month(n, 22), 'Amazon Prime Video', 6.76)), { today }));
+check('Prime Video says add-on channel', /Paramount\+/.test(f[0]?.about || '') && f[0].known_as === null, JSON.stringify(f[0]));
+f = identify(detect([0, 1, 2].map((n) => tx(month(n, 3), 'Netflix', 15.49)), { today }));
+check('a plain name gets no brackets', f[0].known_as === null && /Netflix/.test(f[0].about));
 
 // Names
 check('PayPal prefix', merchantKey('PAYPAL *NETFLIX') === merchantKey('Netflix'), merchantKey('PAYPAL *NETFLIX'));

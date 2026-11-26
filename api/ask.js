@@ -486,6 +486,8 @@ async function runSubscriptions(user) {
   const all = await loadDetected(user);
   const shape = (s) => ({
     name: s.description,
+    probably: s.known_as || null,
+    about: s.about || null,
     amount: s.average_amount,
     frequency: s.frequency,
     monthly: round2(monthlyOf(s)),
