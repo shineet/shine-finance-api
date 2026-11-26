@@ -135,6 +135,9 @@ check('a round amount at no fixed time', detect(rows, { today })[0]?.kind === 't
 rows = [0, 1, 2, 3].map((n) => tx(month(n, 5), 'Patreon', 10));
 check('a round amount monthly is a subscription', detect(rows, { today })[0]?.kind === 'subscription');
 
+check('Dressly can be cancelled by email', identify([{ description: 'Dressly', is_active: true, kind: 'subscription', average_amount: 49.99, last_date: '2026-11-04' }])[0].cancel_email === 'support@dressly.world');
+check('Netflix has no cancel email', identify([{ description: 'Netflix', is_active: true, kind: 'subscription', average_amount: 15, last_date: '2026-11-04' }])[0].cancel_email === null);
+
 // Names
 check('PayPal prefix', merchantKey('PAYPAL *NETFLIX') === merchantKey('Netflix'), merchantKey('PAYPAL *NETFLIX'));
 check('store numbers', merchantKey('SQ *OIL CHANGERS #123') === merchantKey('Oil Changers'), merchantKey('SQ *OIL CHANGERS #123'));
