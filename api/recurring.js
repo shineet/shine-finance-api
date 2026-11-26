@@ -8,6 +8,25 @@
 
 import { plaid, authorize, listItems } from '../lib/plaid.js';
 import { sbHeaders, rest, forUser } from '../lib/db.js';
+import { detect } from '../lib/subscriptions.js';
+
+// Supabase hands back at most 1,000 rows a request: the old fallback read the
+// OLDEST 1,000 of the year and so saw nothing after July. Read every page.
+async function allRows(user, select, sinceDays, extra = '') {
+  const since = new Date();
+  since.setDate(since.getDate() - sinceDays);
+  const out = [];
+  for (let page = 0; page < 40; page++) {
+    const url = rest(`plaid_transactions?select=${select}&${forUser(user)}`) +
+      `&date=gte.${since.toISOString().slice(0, 10)}${extra}&order=date.desc,transaction_id.asc&limit=1000&offset=${page * 1000}`;
+    const r = await fetch(url, { headers: sbHeaders() });
+    if (!r.ok) throw new Error(`transactions: ${r.status}`);
+    const rows = await r.json();
+    out.push(...rows);
+    if (rows.length < 1000) break;
+  }
+  return out.reverse();
+}
 
 function shapeStream(s, direction) {
   return {
@@ -112,23 +131,32 @@ export default async function handler(req, res) {
       })
     );
 
-    // Nothing came back from Plaid at all -- fall back to inference rather
-    // than leaving the planner with no income or bills to work from.
-    if (!inflows.length && !outflows.length) {
-      source = 'inferred';
-      const since = new Date();
-      since.setDate(since.getDate() - 365);
-      const url =
-        rest(`plaid_transactions?select=account_id,date,name,amount,category&${forUser(user)}`) +
-        `&date=gte.${since.toISOString().slice(0, 10)}` +
-        `&order=date.asc&limit=2000`;
-      const r = await fetch(url, { headers: sbHeaders() });
-      if (r.ok) {
-        const rows = await r.json();
-        for (const s of inferStreams(rows)) {
-          (s.direction === 'inflow' ? inflows : outflows).push(s);
+    // Why the banks' own detection said nothing, so the app can say it.
+    const plaidSaid = errors.length
+      ? { ok: false, reason: errors[0].code || errors[0].error || 'error', institutions: errors.map((e) => e.institution) }
+      : { ok: inflows.length + outflows.length > 0, reason: inflows.length + outflows.length ? null : 'NO_STREAMS' };
+
+    // Subscriptions and bills from the transactions themselves: two years, so a
+    // yearly one has been seen twice. Each comes with every charge behind it.
+    let subscriptions = [];
+    let subscriptionsError = null;
+    try {
+      const rows = await allRows(user, 'transaction_id,account_id,institution,date,name,amount,category,pending', 760);
+      subscriptions = detect(rows);
+      // Nothing came back from Plaid at all: what was found here is the
+      // planner's bills, and income is inferred from the same rows.
+      if (!inflows.length && !outflows.length) {
+        source = 'inferred';
+        const year = rows.filter((r) => Date.now() - new Date(r.date).getTime() <= 365 * 86400000);
+        for (const s of inferStreams(year)) if (s.direction === 'inflow') inflows.push(s);
+        for (const s of subscriptions) {
+          if (!s.is_active) continue;
+          const { charges, kind, first_date, price_change, institution, ...stream } = s;
+          outflows.push({ ...stream, id: s.id });
         }
       }
+    } catch (err) {
+      subscriptionsError = err.message;
     }
 
     const sortByAmount = (a, b) => b.average_amount - a.average_amount;
@@ -137,6 +165,8 @@ export default async function handler(req, res) {
       inflows: inflows.sort(sortByAmount),
       outflows: outflows.sort(sortByAmount),
       errors,
+      detection: { plaid: plaidSaid, subscriptions: subscriptionsError },
+      subscriptions,
       as_of: new Date().toISOString(),
     });
   } catch (err) {
