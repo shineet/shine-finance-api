@@ -975,7 +975,13 @@ export default async function handler(req, res) {
         headers: { 'X-Api-Key': process.env.RENTCAST_API_KEY, Accept: 'application/json' },
       });
       if (r.status === 404) return res.status(404).json({ error: 'That address was not found.' });
-      if (!r.ok) { console.error('[ask] home_value', r.status); return res.status(502).json({ error: 'Could not get an estimate just now.' }); }
+      if (!r.ok) {
+        // RentCast's own reason (never the address or the key), so a refusal can be told from an outage.
+        const why = (await r.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 300);
+        console.error('[ask] home_value', r.status, why);
+        if (r.status === 401 || r.status === 403) return res.status(502).json({ error: 'The home value service refused the request. Its account needs attention.' });
+        return res.status(502).json({ error: 'Could not get an estimate just now.' });
+      }
       const j = await r.json();
       const price = Number(j.price);
       if (!Number.isFinite(price) || price <= 0) return res.status(404).json({ error: 'No estimate for that address.' });
