@@ -961,6 +961,30 @@ export default async function handler(req, res) {
     }
   }
 
+  // A US home's value this month, from its address (RentCast). Here rather
+  // than its own function: Vercel Hobby allows 12 and all 12 are used. The
+  // address is passed on and never logged.
+  if (req.body?.mode === 'home_value') {
+    const address = (req.body?.address || '').toString().trim().slice(0, 200);
+    if (!address) return res.status(400).json({ error: 'Give the address.' });
+    if (!process.env.RENTCAST_API_KEY) return res.status(503).json({ error: 'Home values are not set up yet.' });
+    try {
+      const r = await fetch(`https://api.rentcast.io/v1/avm/value?address=${encodeURIComponent(address)}`, {
+        headers: { 'X-Api-Key': process.env.RENTCAST_API_KEY, Accept: 'application/json' },
+      });
+      if (r.status === 404) return res.status(404).json({ error: 'That address was not found.' });
+      if (!r.ok) { console.error('[ask] home_value', r.status); return res.status(502).json({ error: 'Could not get an estimate just now.' }); }
+      const j = await r.json();
+      const price = Number(j.price);
+      if (!Number.isFinite(price) || price <= 0) return res.status(404).json({ error: 'No estimate for that address.' });
+      const num = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : null);
+      return res.status(200).json({ price, low: num(j.priceRangeLow), high: num(j.priceRangeHigh) });
+    } catch (err) {
+      console.error('[ask] home_value', err.message);
+      return res.status(502).json({ error: 'Could not get an estimate just now.' });
+    }
+  }
+
   if (!process.env.ANTHROPIC_API_KEY) {
     return res.status(503).json({ error: 'Ask is not configured yet.' });
   }
