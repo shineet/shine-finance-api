@@ -869,6 +869,9 @@ Clickable elements:\n${lines.join('\n')}`;
   const action = actions.includes(j.action) ? j.action : 'failed';
   const id = Number.isInteger(j.id) && els.some((e) => Number(e.id) === j.id) ? j.id : null;
   if ((action === 'click' || action === 'confirm_final') && id === null) return { action: 'failed', id: null, say: 'I could not tell what to press next.', why: 'no element' };
+  let host = ''; try { host = new URL(String(page.url || '')).host; } catch {}
+  const label = id === null ? '' : String(els.find((e) => Number(e.id) === id)?.text || '').slice(0, 60);
+  console.log('[cancel_step]', JSON.stringify({ host, action, label, why: String(j.why || '').slice(0, 80), step: (b.history || []).length, elements: els.length, password: !!page.hasPassword }));
   return { action, id, say: typeof j.say === 'string' ? j.say.slice(0, 240) : '', why: typeof j.why === 'string' ? j.why.slice(0, 120) : '' };
 }
 
