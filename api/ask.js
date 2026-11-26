@@ -827,6 +827,37 @@ const SPOKEN_NOTE = `
 
 This question was spoken aloud and your answer will be read out loud by a voice, in a back and forth conversation. Talk the way a person would across a table. Lead with the answer. One to three short sentences, each one idea. Use contractions. No lists, no markdown, no tables, no headings, no brackets, no dashes, no abbreviations: write "about two hundred dollars", "a month", "December twelfth", "interest rate". Round amounts unless the exact figure was asked for. Do not repeat the question, and do not open with filler such as "great question" or "based on your data". If the full answer is a list of transactions, give the headline and say the details are on screen. Earlier turns are part of the same conversation, so "what about last month" or "and that one" refers back to them. The words come from speech recognition, which often writes a word that only SOUNDS like the one said ("dead" for "debt", "bounce" for "balance", "spear" for "spare", a shop's name spelled as ordinary words). Take the likeliest meaning for a personal finance app, answer that, and do not mention the mistake. If two meanings fit, ask one short question naming the likelier, such as "Did you mean your debt?". Never treat a misheard word as a feature of MyFinance, and never describe a feature you were not told about. Still add the FOLLOWUPS line.`;
 
+/// How to cancel a subscription with this company: an email address that takes
+/// cancellations, the cancel page, and where each was found. Web search only,
+/// no user data is sent: just the name as it appears on a statement.
+async function findCancelContact(name) {
+  const system = `You find how to cancel a consumer subscription. Search the web. Prefer the company's own help or contact pages; a third-party guide only when the company says nothing. Reply with ONLY one JSON object, no other text:
+{"company": "the company's real name", "email": "an email address that takes cancellation or account requests, or null", "email_source": "the URL where that address appears, or null", "email_official": true if that URL is the company's own site, "cancel_url": "the page where the subscription is cancelled online, or null", "how": "one short sentence: the usual way to cancel (for example in the app's settings, on the website, in Apple's or Google's subscriptions, by phone)"}
+Never invent an address. If no address is published, use null.`;
+  const res = await fetch(ANTHROPIC_URL, {
+    method: 'POST',
+    headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2026-10-21', 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: MODEL, max_tokens: 1024, system,
+      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }],
+      messages: [{ role: 'user', content: `How do I cancel a subscription that appears on my US card statement as "${name.replace(/"/g, '')}"?` }],
+    }),
+  });
+  if (!res.ok) throw new Error(`anthropic ${res.status}: ${await res.text()}`);
+  const out = await res.json();
+  const text = (out.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+  const m = text.match(/\{[\s\S]*\}/);
+  let j = {};
+  try { j = m ? JSON.parse(m[0]) : {}; } catch { j = {}; }
+  const email = typeof j.email === 'string' && /^[^@\s<>,;]+@[^@\s<>,;]+\.[A-Za-z]{2,}$/.test(j.email.trim()) ? j.email.trim() : null;
+  const url = (u) => (typeof u === 'string' && /^https:\/\//.test(u) ? u : null);
+  return {
+    company: typeof j.company === 'string' ? j.company.slice(0, 80) : null,
+    email, email_source: email ? url(j.email_source) : null, email_official: email ? j.email_official === true : false,
+    cancel_url: url(j.cancel_url), how: typeof j.how === 'string' ? j.how.slice(0, 300) : null,
+  };
+}
+
 async function callAnthropic(messages, spoken = false) {
   const res = await fetch(ANTHROPIC_URL, {
     method: 'POST',
@@ -861,6 +892,14 @@ export default async function handler(req, res) {
 
   if (!process.env.ANTHROPIC_API_KEY) {
     return res.status(503).json({ error: 'Ask is not configured yet.' });
+  }
+
+  // Cancel help: where this company takes cancellations, found by a web search.
+  if (req.body?.mode === 'cancel_contact') {
+    const name = (req.body?.name || '').toString().trim().slice(0, 120);
+    if (!name) return res.status(400).json({ error: 'Name the company.' });
+    try { return res.status(200).json(await findCancelContact(name)); }
+    catch (err) { console.error('[ask] cancel_contact', err.message); return res.status(502).json({ error: 'Could not search just now.' }); }
   }
 
   const question = (req.body?.question || '').toString().trim();
