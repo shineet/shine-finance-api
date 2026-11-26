@@ -830,7 +830,8 @@ This question was spoken aloud and your answer will be read out loud by a voice,
 const CANCEL_AGENT = `You cancel ONE subscription on the user's own account, in a browser inside their finance app. The user signed in themselves and is watching every step.
 Each turn you get the page (address, title, visible text) and its clickable elements, each with an id, plus what you already did. Choose exactly ONE action.
 Actions:
-- "click": click element id, to move toward cancelling (account menu, memberships, manage, cancel, "continue to cancel", "no thanks", a reason for leaving, a custom drop-down or its option). Also use it to reach the sign-in page: if the user is plainly signed out (a "Sign in" or "Log in" link or button, no account details on the page), click that link so the sign-in form comes up.
+- "click": click element id, to move toward cancelling (account menu, memberships, manage, cancel, "continue to cancel", "no thanks", a reason for leaving, a custom drop-down or its option). Also use it to reach the sign-in page: if the user is plainly signed out (a "Sign in" or "Log in" link or button, no account details on the page), click that link so the sign-in form comes up. Elements marked "[icon]" have no words: "[icon] menu" is usually the menu that holds Account and Sign in; open it when no sign-in or account link is visible.
+- "sign_in": the user is signed out and you can see no sign-in or account link or menu to press. The app then looks for the sign-in page itself.
 - "choose": for a drop-down list (tag "select"), choose one of its options; put the exact option text in "option". Only for a reason for leaving or a step of cancelling.
 - "confirm_final": the ONE click that actually ends the subscription (for example "Cancel membership", "Confirm cancellation", "End membership", "Turn off auto-renew"). Never use "click" for it: the app asks the user first.
 - "need_user": the page wants the user: a sign-in form is showing (email, username or password boxes), a verification code, a puzzle or "verify you are human", choosing an account, or anything you must not do. Say what they need to do, for example "Sign in here, then tap Continue".
@@ -881,8 +882,8 @@ Clickable elements:\n${lines.join('\n')}`;
   try { j = m ? JSON.parse(m[0]) : {}; } catch { j = {}; }
   const said = String(j.action || '').toLowerCase();
   // Words a model may use for the same thing.
-  const alias = { select: 'choose', pick: 'choose', press: 'click', tap: 'click', open: 'click', login: 'need_user', sign_in: 'need_user', complete: 'done', cancelled: 'done', confirm: 'confirm_final' };
-  const actions = ['click', 'choose', 'confirm_final', 'need_user', 'desktop', 'wait', 'done', 'failed'];
+  const alias = { select: 'choose', pick: 'choose', press: 'click', tap: 'click', open: 'click', login: 'sign_in', signin: 'sign_in', complete: 'done', cancelled: 'done', confirm: 'confirm_final' };
+  const actions = ['click', 'choose', 'confirm_final', 'need_user', 'sign_in', 'desktop', 'wait', 'done', 'failed'];
   const action = actions.includes(said) ? said : alias[said] || 'failed';
   if (!actions.includes(said) && !alias[said]) console.log('[cancel_step] not understood', JSON.stringify({ stop, text: text.slice(0, 300) }));
   const n = Number(j.id);
@@ -903,7 +904,7 @@ Clickable elements:\n${lines.join('\n')}`;
 /// no user data is sent: just the name as it appears on a statement.
 async function findCancelContact(name) {
   const system = `You find how to cancel a consumer subscription. Search the web. Prefer the company's own help or contact pages; a third-party guide only when the company says nothing. Reply with ONLY one JSON object, no other text:
-{"company": "the company's real name", "email": "an email address that takes cancellation or account requests, or null", "email_source": "the URL where that address appears, or null", "email_official": true if that URL is the company's own site, "cancel_url": "the page where the subscription is cancelled online, or null", "how": "one short sentence: the usual way to cancel (for example in the app's settings, on the website, in Apple's or Google's subscriptions, by phone)"}
+{"company": "the company's real name", "email": "an email address that takes cancellation or account requests, or null", "email_source": "the URL where that address appears, or null", "email_official": true if that URL is the company's own site, "cancel_url": "the page where the subscription is cancelled online, or null", "login_url": "the company's own sign-in page for customers, or null", "homepage": "the company's own website, https, or null", "how": "one short sentence: the usual way to cancel (for example in the app's settings, on the website, in Apple's or Google's subscriptions, by phone)"}
 Never invent an address. If no address is published, use null.`;
   const res = await fetch(ANTHROPIC_URL, {
     method: 'POST',
@@ -925,7 +926,8 @@ Never invent an address. If no address is published, use null.`;
   return {
     company: typeof j.company === 'string' ? j.company.slice(0, 80) : null,
     email, email_source: email ? url(j.email_source) : null, email_official: email ? j.email_official === true : false,
-    cancel_url: url(j.cancel_url), how: typeof j.how === 'string' ? j.how.slice(0, 300) : null,
+    cancel_url: url(j.cancel_url), login_url: url(j.login_url), homepage: url(j.homepage),
+    how: typeof j.how === 'string' ? j.how.slice(0, 300) : null,
   };
 }
 
