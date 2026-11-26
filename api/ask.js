@@ -834,9 +834,11 @@ Actions:
 - "choose": for a drop-down list (tag "select"), choose one of its options; put the exact option text in "option". Only for a reason for leaving or a step of cancelling.
 - "confirm_final": the ONE click that actually ends the subscription (for example "Cancel membership", "Confirm cancellation", "End membership", "Turn off auto-renew"). Never use "click" for it: the app asks the user first.
 - "need_user": the page wants the user: a sign-in form is showing (email, username or password boxes), a verification code, a puzzle or "verify you are human", choosing an account, or anything you must not do. Say what they need to do, for example "Sign in here, then tap Continue".
+- "desktop": the page says to open it on a computer or desktop, or shows a cut-down mobile page with no account settings. The app switches to the desktop version of the site.
 - "wait": the page is still loading.
 - "done": the page says the subscription is cancelled or will end. Put the end date in "say" if shown.
 - "failed": you cannot find a way after trying; say what you saw.
+You have no tools: never write tool calls, only the JSON object.
 Rules: never buy, upgrade, switch plan, pause instead of cancel, accept an offer or discount, change payment details, or delete the account. Decline offers to stay by choosing the option that continues cancelling. Never type anything. Do not repeat a click that did not change the page; try another way or say failed. If the page is not the right company or account, use need_user.
 If the subscription is billed by Apple, Google or PayPal (the page says so, or says to cancel in the App Store), use need_user and say where to cancel.
 Reply with ONLY one JSON object: {"action": "...", "id": number or null, "option": "for choose only", "say": "one short sentence for the user", "why": "a few words"}`;
@@ -857,23 +859,31 @@ A password field is on the page: ${page.hasPassword ? 'yes' : 'no'}
 A sign-in form (email or username box) is on the page: ${page.hasLoginForm ? 'yes' : 'no'}
 Visible text:\n${String(page.text || '').slice(0, 5000)}
 Clickable elements:\n${lines.join('\n')}`;
-  const res = await fetch(ANTHROPIC_URL, {
-    method: 'POST',
-    headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2026-10-21', 'content-type': 'application/json' },
-    body: JSON.stringify({ model: MODEL, max_tokens: 300, system: CANCEL_AGENT, messages: [{ role: 'user', content }] }),
-  });
-  if (!res.ok) throw new Error(`anthropic ${res.status}: ${await res.text()}`);
-  const out = await res.json();
-  const text = (out.content || []).filter((x) => x.type === 'text').map((x) => x.text).join('');
+  const ask = async (extra) => {
+    const res = await fetch(ANTHROPIC_URL, {
+      method: 'POST',
+      headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2026-10-21', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: MODEL, max_tokens: 400, system: CANCEL_AGENT, messages: [{ role: 'user', content: content + extra }] }),
+    });
+    if (!res.ok) throw new Error(`anthropic ${res.status}: ${await res.text()}`);
+    const out = await res.json();
+    return { stop: out.stop_reason, text: (out.content || []).filter((x) => x.type === 'text').map((x) => x.text).join('') };
+  };
+  let { stop, text } = await ask('');
+  // An empty answer, or a tool call it does not have: once more, stricter (Shine's CapCut, 2026-11-25).
+  if (!/\{[\s\S]*"action"[\s\S]*\}/.test(text)) {
+    console.log('[cancel_step] retry', JSON.stringify({ stop, text: text.slice(0, 200) }));
+    ({ stop, text } = await ask('\n\nAnswer now with ONLY the JSON object described, starting with { and nothing else.'));
+  }
   const m = text.match(/\{[\s\S]*\}/);
   let j = {};
   try { j = m ? JSON.parse(m[0]) : {}; } catch { j = {}; }
   const said = String(j.action || '').toLowerCase();
   // Words a model may use for the same thing.
   const alias = { select: 'choose', pick: 'choose', press: 'click', tap: 'click', open: 'click', login: 'need_user', sign_in: 'need_user', complete: 'done', cancelled: 'done', confirm: 'confirm_final' };
-  const actions = ['click', 'choose', 'confirm_final', 'need_user', 'wait', 'done', 'failed'];
+  const actions = ['click', 'choose', 'confirm_final', 'need_user', 'desktop', 'wait', 'done', 'failed'];
   const action = actions.includes(said) ? said : alias[said] || 'failed';
-  if (!actions.includes(said) && !alias[said]) console.log('[cancel_step] not understood', JSON.stringify(text.slice(0, 300)));
+  if (!actions.includes(said) && !alias[said]) console.log('[cancel_step] not understood', JSON.stringify({ stop, text: text.slice(0, 300) }));
   const n = Number(j.id);
   const id = Number.isInteger(n) && els.some((e) => Number(e.id) === n) ? n : null;
   if ((action === 'click' || action === 'confirm_final' || action === 'choose') && id === null) {
