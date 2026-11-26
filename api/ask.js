@@ -830,21 +830,23 @@ This question was spoken aloud and your answer will be read out loud by a voice,
 const CANCEL_AGENT = `You cancel ONE subscription on the user's own account, in a browser inside their finance app. The user signed in themselves and is watching every step.
 Each turn you get the page (address, title, visible text) and its clickable elements, each with an id, plus what you already did. Choose exactly ONE action.
 Actions:
-- "click": click element id, to move toward cancelling (account menu, memberships, manage, cancel, "continue to cancel", "no thanks", a reason for leaving).
+- "click": click element id, to move toward cancelling (account menu, memberships, manage, cancel, "continue to cancel", "no thanks", a reason for leaving, a custom drop-down or its option). Also use it to reach the sign-in page: if the user is plainly signed out (a "Sign in" or "Log in" link or button, no account details on the page), click that link so the sign-in form comes up.
+- "choose": for a drop-down list (tag "select"), choose one of its options; put the exact option text in "option". Only for a reason for leaving or a step of cancelling.
 - "confirm_final": the ONE click that actually ends the subscription (for example "Cancel membership", "Confirm cancellation", "End membership", "Turn off auto-renew"). Never use "click" for it: the app asks the user first.
-- "need_user": the page wants the user: sign in, a password, a verification code, a puzzle or "verify you are human", choosing an account, or anything you must not do. Say what they need to do.
+- "need_user": the page wants the user: a sign-in form is showing (email, username or password boxes), a verification code, a puzzle or "verify you are human", choosing an account, or anything you must not do. Say what they need to do, for example "Sign in here, then tap Continue".
 - "wait": the page is still loading.
 - "done": the page says the subscription is cancelled or will end. Put the end date in "say" if shown.
 - "failed": you cannot find a way after trying; say what you saw.
 Rules: never buy, upgrade, switch plan, pause instead of cancel, accept an offer or discount, change payment details, or delete the account. Decline offers to stay by choosing the option that continues cancelling. Never type anything. Do not repeat a click that did not change the page; try another way or say failed. If the page is not the right company or account, use need_user.
-Reply with ONLY one JSON object: {"action": "...", "id": number or null, "say": "one short sentence for the user", "why": "a few words"}`;
+If the subscription is billed by Apple, Google or PayPal (the page says so, or says to cancel in the App Store), use need_user and say where to cancel.
+Reply with ONLY one JSON object: {"action": "...", "id": number or null, "option": "for choose only", "say": "one short sentence for the user", "why": "a few words"}`;
 
 /// The next step of a cancellation, from what the page shows. Only the page's visible text and clickable labels are sent,
 /// never what is typed into a field.
 async function nextCancelStep(b) {
   const page = b.page || {};
   const els = Array.isArray(page.elements) ? page.elements.slice(0, 150) : [];
-  const lines = els.map((e) => `[${Number(e.id)}] ${String(e.tag || '').slice(0, 10)}${e.role ? '/' + String(e.role).slice(0, 12) : ''}: ${String(e.text || '').slice(0, 80)}${e.href ? ' -> ' + String(e.href).slice(0, 100) : ''}`);
+  const lines = els.map((e) => `[${Number(e.id)}] ${String(e.tag || '').slice(0, 10)}${e.role ? '/' + String(e.role).slice(0, 12) : ''}: ${String(e.text || '').slice(0, 80)}${e.href ? ' -> ' + String(e.href).slice(0, 100) : ''}${Array.isArray(e.options) ? ' options: ' + e.options.slice(0, 15).map((o) => JSON.stringify(String(o).slice(0, 50))).join(', ') : ''}`);
   const history = (Array.isArray(b.history) ? b.history.slice(-12) : []).map((h) => `- ${String(h).slice(0, 160)}`).join('\n') || '- (nothing yet)';
   const content = `Subscription to cancel: ${String(b.name || '').slice(0, 80)} (${String(b.company || b.name || '').slice(0, 80)}), ${String(b.price || '').slice(0, 40)}.
 How it is usually cancelled: ${String(b.how || 'unknown').slice(0, 300)}
@@ -852,6 +854,7 @@ Done so far:\n${history}
 Page address: ${String(page.url || '').slice(0, 300)}
 Page title: ${String(page.title || '').slice(0, 150)}
 A password field is on the page: ${page.hasPassword ? 'yes' : 'no'}
+A sign-in form (email or username box) is on the page: ${page.hasLoginForm ? 'yes' : 'no'}
 Visible text:\n${String(page.text || '').slice(0, 5000)}
 Clickable elements:\n${lines.join('\n')}`;
   const res = await fetch(ANTHROPIC_URL, {
@@ -865,14 +868,23 @@ Clickable elements:\n${lines.join('\n')}`;
   const m = text.match(/\{[\s\S]*\}/);
   let j = {};
   try { j = m ? JSON.parse(m[0]) : {}; } catch { j = {}; }
-  const actions = ['click', 'confirm_final', 'need_user', 'wait', 'done', 'failed'];
-  const action = actions.includes(j.action) ? j.action : 'failed';
-  const id = Number.isInteger(j.id) && els.some((e) => Number(e.id) === j.id) ? j.id : null;
-  if ((action === 'click' || action === 'confirm_final') && id === null) return { action: 'failed', id: null, say: 'I could not tell what to press next.', why: 'no element' };
+  const said = String(j.action || '').toLowerCase();
+  // Words a model may use for the same thing.
+  const alias = { select: 'choose', pick: 'choose', press: 'click', tap: 'click', open: 'click', login: 'need_user', sign_in: 'need_user', complete: 'done', cancelled: 'done', confirm: 'confirm_final' };
+  const actions = ['click', 'choose', 'confirm_final', 'need_user', 'wait', 'done', 'failed'];
+  const action = actions.includes(said) ? said : alias[said] || 'failed';
+  if (!actions.includes(said) && !alias[said]) console.log('[cancel_step] not understood', JSON.stringify(text.slice(0, 300)));
+  const n = Number(j.id);
+  const id = Number.isInteger(n) && els.some((e) => Number(e.id) === n) ? n : null;
+  if ((action === 'click' || action === 'confirm_final' || action === 'choose') && id === null) {
+    console.log('[cancel_step] no element', JSON.stringify(text.slice(0, 300)));
+    return { action: 'failed', id: null, say: 'I could not tell what to press next.', why: 'no element' };
+  }
+  const option = action === 'choose' && typeof j.option === 'string' ? j.option.slice(0, 80) : null;
   let host = ''; try { host = new URL(String(page.url || '')).host; } catch {}
   const label = id === null ? '' : String(els.find((e) => Number(e.id) === id)?.text || '').slice(0, 60);
   console.log('[cancel_step]', JSON.stringify({ host, action, label, why: String(j.why || '').slice(0, 80), step: (b.history || []).length, elements: els.length, password: !!page.hasPassword }));
-  return { action, id, say: typeof j.say === 'string' ? j.say.slice(0, 240) : '', why: typeof j.why === 'string' ? j.why.slice(0, 120) : '' };
+  return { action, id, option, say: typeof j.say === 'string' ? j.say.slice(0, 240) : '', why: typeof j.why === 'string' ? j.why.slice(0, 120) : '' };
 }
 
 /// How to cancel a subscription with this company: an email address that takes
