@@ -499,15 +499,17 @@ async function runSubscriptions(user) {
   });
   const subs = all.filter((s) => s.kind === 'subscription' && s.is_active).map(shape).sort((a, b) => b.monthly - a.monthly);
   const bills = all.filter((s) => s.kind === 'bill' && s.is_active).map(shape).sort((a, b) => b.monthly - a.monthly);
+  const topups = all.filter((s) => s.kind === 'topup' && s.is_active).map((s) => ({ name: s.description, probably: s.known_as || null, usual_top_up: s.average_amount, times_a_month: s.times_a_month, about_monthly: s.monthly_spend, last_topped_up: s.last_date }));
   const stopped = all.filter((s) => s.kind === 'subscription' && !s.is_active).map((s) => ({ name: s.description, amount: s.average_amount, last_paid: s.last_date }));
   return {
     count: subs.length,
     total_monthly: round2(subs.reduce((t, x) => t + x.monthly, 0)),
     subscriptions: subs.slice(0, 50),
     bills_not_subscriptions: bills.slice(0, 30),
+    top_ups: topups.slice(0, 20),
     stopped_recently: stopped.slice(0, 20),
     recently_went_up: subs.filter((s) => s.price_change).map((s) => ({ name: s.name, from: s.price_change.from, to: s.price_change.to, on: s.price_change.on })),
-    note: subs.length ? 'Found in their transactions: the same company, about the same price, on a steady schedule. Bills (mortgage, loans, utilities, phone, insurance, tuition) are listed apart.' : 'No subscriptions were found in their transactions.',
+    note: subs.length ? 'Found in their transactions: the same company, about the same price, on a steady schedule. Bills (mortgage, loans, utilities, phone, insurance, tuition) and top-ups (a toll tag or card reloaded by a fixed amount when it runs low) are listed apart.' : 'No subscriptions were found in their transactions.',
   };
 }
 

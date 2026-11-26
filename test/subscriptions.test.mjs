@@ -122,6 +122,19 @@ check('Prime Video says add-on channel', /Paramount\+/.test(f[0]?.about || '') &
 f = identify(detect([0, 1, 2].map((n) => tx(month(n, 3), 'Netflix', 15.49)), { today }));
 check('a plain name gets no brackets', f[0].known_as === null && /Netflix/.test(f[0].about));
 
+// Top-ups: a toll tag at $10 whenever it runs low
+rows = ['08-02', '08-19', '08-27', '09-20', '10-03', '10-09', '10-30', '11-14', '11-21'].map((d) => tx(`2026-${d}`, 'Central Texas Regional Mobility Road Authority', 10, { category: 'TRANSPORTATION' }));
+f = identify(detect(rows, { today }));
+check('a toll tag is a top-up', f.length === 1 && f[0].kind === 'topup' && f[0].average_amount === 10 && f[0].is_active, JSON.stringify(f.map((s) => [s.kind, s.average_amount])));
+check('with what it comes to a month', f[0]?.monthly_spend > 20 && f[0]?.monthly_spend < 40 && monthly(f[0]) === f[0].monthly_spend, String(f[0]?.monthly_spend));
+check('and a name', f[0]?.known_as === 'Texas toll account', String(f[0]?.known_as));
+// A round amount at no fixed time, unnamed: a top-up too
+rows = ['07-01', '07-09', '08-20', '09-02', '10-15', '11-01'].map((d) => tx(`2026-${d}`, 'Acme Card Services', 25, { category: 'GENERAL_SERVICES' }));
+check('a round amount at no fixed time', detect(rows, { today })[0]?.kind === 'topup');
+// But a round amount on a schedule stays a subscription
+rows = [0, 1, 2, 3].map((n) => tx(month(n, 5), 'Patreon', 10));
+check('a round amount monthly is a subscription', detect(rows, { today })[0]?.kind === 'subscription');
+
 // Names
 check('PayPal prefix', merchantKey('PAYPAL *NETFLIX') === merchantKey('Netflix'), merchantKey('PAYPAL *NETFLIX'));
 check('store numbers', merchantKey('SQ *OIL CHANGERS #123') === merchantKey('Oil Changers'), merchantKey('SQ *OIL CHANGERS #123'));

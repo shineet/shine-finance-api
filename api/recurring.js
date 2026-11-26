@@ -137,7 +137,7 @@ export default async function handler(req, res) {
         const year = rows.filter((r) => Date.now() - new Date(r.date).getTime() <= 365 * 86400000);
         for (const s of inferStreams(year)) if (s.direction === 'inflow') inflows.push(s);
         for (const s of subscriptions) {
-          if (!s.is_active) continue;
+          if (!s.is_active || s.kind === 'topup') continue;
           const { charges, kind, first_date, price_change, institution, known_as, about, ...stream } = s;
           outflows.push({ ...stream, id: s.id });
         }
