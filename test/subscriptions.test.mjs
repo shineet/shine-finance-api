@@ -82,6 +82,33 @@ f = detect(rows, { today });
 check('usage billing is one subscription, still going', f.length === 1 && f[0].is_active && f[0].charges.length === 6, JSON.stringify(f.map((s) => [s.average_amount, s.is_active, s.charges.length])));
 check('Apple Card payment is movement', isMovement('Apple Card', 'LOAN_PAYMENTS') && isMovement('APPLECARD GSBANK PAYMENT', null));
 
+// The real log of 2026-11-25: PayPal copies a few cents off the bank's
+rows = ['05-28', '06-28', '07-28', '08-28', '09-28', '10-28'].map((d) => tx(`2026-${d}`, 'Netflix', 29.43, { account_id: 'pp', institution: 'PayPal' }))
+  .concat([tx('2026-06-29', 'Netflix', 29.44, { account_id: 'chk' }), tx('2026-07-28', 'Netflix', 29.43, { account_id: 'chk' })]);
+f = detect(rows, { today });
+check('Netflix with PayPal copies is one, active', f.length === 1 && f[0].is_active && f[0].charges.length === 6, JSON.stringify(f.map((s) => [s.charges.length, s.is_active])));
+// Two ChatGPT plans, the 3rd and the 10th, plus small API charges
+rows = ['09-03', '09-10', '10-04', '10-11', '11-03', '11-10'].map((d) => tx(`2026-${d}`, 'OpenAI', 21.28, { category: 'GENERAL_SERVICES' }))
+  .concat(['09-14', '10-01', '10-04', '10-08'].map((d, i) => tx(`2026-${d}`, 'OpenAI', [5, 5, 5.2, 6][i], { category: 'GENERAL_SERVICES' })));
+f = detect(rows, { today });
+check('two plans at one price are two subscriptions', f.filter((s) => s.average_amount === 21.28 && s.is_active).length === 2 && new Set(f.map((s) => s.id)).size === f.length, JSON.stringify(f.map((s) => [s.id, s.average_amount, s.charges.length])));
+// A wash club that began in October, after a one-off visit in May
+rows = [tx('2026-05-22', 'Oil Changers', 36.2), tx('2026-10-15', 'Oil Changers', 34.99), tx('2026-11-15', 'Oil Changers', 34.99)];
+f = detect(rows, { today });
+check('a club begun later is found', f.some((s) => s.average_amount === 34.99 && s.is_active && s.charges.length === 2), JSON.stringify(f));
+check('PayPal purchase prefix', merchantKey('PAYPAL PURCHASE CAPCUT WEB ID: PAYPALSI77') === merchantKey('CapCut'), merchantKey('PAYPAL PURCHASE CAPCUT WEB ID: PAYPALSI77'));
+
+// CapCut: two plans at two prices, a week apart each month: two, never weekly
+rows = [tx('2026-10-01', 'CapCut', 21.64), tx('2026-10-07', 'CapCut', 24.99, { account_id: 'pp', institution: 'PayPal' }), tx('2026-11-02', 'CapCut', 21.64), tx('2026-11-07', 'CapCut', 24.99, { account_id: 'pp', institution: 'PayPal' })];
+f = detect(rows, { today });
+check('two plans at two prices', f.length === 2 && f.every((s) => s.frequency === 'MONTHLY' && s.is_active), JSON.stringify(f.map((s) => [s.frequency, s.average_amount])));
+// Small gym charges at two prices, twice: not enough
+rows = [tx('2026-10-29', '24 Hour Fitness', 3.79), tx('2026-11-23', '24 Hour Fitness', 3.99)];
+check('two charges at different prices are not a subscription', detect(rows, { today }).length === 0);
+// Two charges a month apart but long overdue: not enough
+rows = [tx('2026-08-14', 'Anthropic', 10.78), tx('2026-09-14', 'Anthropic', 10.78)];
+check('an overdue pair is not a subscription', detect(rows, { today }).length === 0);
+
 // Names
 check('PayPal prefix', merchantKey('PAYPAL *NETFLIX') === merchantKey('Netflix'), merchantKey('PAYPAL *NETFLIX'));
 check('store numbers', merchantKey('SQ *OIL CHANGERS #123') === merchantKey('Oil Changers'), merchantKey('SQ *OIL CHANGERS #123'));
