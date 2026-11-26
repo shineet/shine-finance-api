@@ -8,7 +8,7 @@
 
 import { plaid, authorize, listItems } from '../lib/plaid.js';
 import { sbHeaders, rest, forUser } from '../lib/db.js';
-import { detect } from '../lib/subscriptions.js';
+import { detect, explain } from '../lib/subscriptions.js';
 import { allRows } from '../lib/detected.js';
 
 
@@ -128,6 +128,7 @@ export default async function handler(req, res) {
     try {
       const rows = await allRows(user, 'transaction_id,account_id,institution,date,name,amount,category,pending', 760);
       subscriptions = detect(rows);
+      try { for (const e of explain(rows, subscriptions)) console.log('[subs-explain]', JSON.stringify(e)); } catch {}
       // Nothing came back from Plaid at all: what was found here is the
       // planner's bills, and income is inferred from the same rows.
       if (!inflows.length && !outflows.length) {
