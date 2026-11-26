@@ -827,6 +827,51 @@ const SPOKEN_NOTE = `
 
 This question was spoken aloud and your answer will be read out loud by a voice, in a back and forth conversation. Talk the way a person would across a table. Lead with the answer. One to three short sentences, each one idea. Use contractions. No lists, no markdown, no tables, no headings, no brackets, no dashes, no abbreviations: write "about two hundred dollars", "a month", "December twelfth", "interest rate". Round amounts unless the exact figure was asked for. Do not repeat the question, and do not open with filler such as "great question" or "based on your data". If the full answer is a list of transactions, give the headline and say the details are on screen. Earlier turns are part of the same conversation, so "what about last month" or "and that one" refers back to them. The words come from speech recognition, which often writes a word that only SOUNDS like the one said ("dead" for "debt", "bounce" for "balance", "spear" for "spare", a shop's name spelled as ordinary words). Take the likeliest meaning for a personal finance app, answer that, and do not mention the mistake. If two meanings fit, ask one short question naming the likelier, such as "Did you mean your debt?". Never treat a misheard word as a feature of MyFinance, and never describe a feature you were not told about. Still add the FOLLOWUPS line.`;
 
+const CANCEL_AGENT = `You cancel ONE subscription on the user's own account, in a browser inside their finance app. The user signed in themselves and is watching every step.
+Each turn you get the page (address, title, visible text) and its clickable elements, each with an id, plus what you already did. Choose exactly ONE action.
+Actions:
+- "click": click element id, to move toward cancelling (account menu, memberships, manage, cancel, "continue to cancel", "no thanks", a reason for leaving).
+- "confirm_final": the ONE click that actually ends the subscription (for example "Cancel membership", "Confirm cancellation", "End membership", "Turn off auto-renew"). Never use "click" for it: the app asks the user first.
+- "need_user": the page wants the user: sign in, a password, a verification code, a puzzle or "verify you are human", choosing an account, or anything you must not do. Say what they need to do.
+- "wait": the page is still loading.
+- "done": the page says the subscription is cancelled or will end. Put the end date in "say" if shown.
+- "failed": you cannot find a way after trying; say what you saw.
+Rules: never buy, upgrade, switch plan, pause instead of cancel, accept an offer or discount, change payment details, or delete the account. Decline offers to stay by choosing the option that continues cancelling. Never type anything. Do not repeat a click that did not change the page; try another way or say failed. If the page is not the right company or account, use need_user.
+Reply with ONLY one JSON object: {"action": "...", "id": number or null, "say": "one short sentence for the user", "why": "a few words"}`;
+
+/// The next step of a cancellation, from what the page shows. Only the page's visible text and clickable labels are sent,
+/// never what is typed into a field.
+async function nextCancelStep(b) {
+  const page = b.page || {};
+  const els = Array.isArray(page.elements) ? page.elements.slice(0, 150) : [];
+  const lines = els.map((e) => `[${Number(e.id)}] ${String(e.tag || '').slice(0, 10)}${e.role ? '/' + String(e.role).slice(0, 12) : ''}: ${String(e.text || '').slice(0, 80)}${e.href ? ' -> ' + String(e.href).slice(0, 100) : ''}`);
+  const history = (Array.isArray(b.history) ? b.history.slice(-12) : []).map((h) => `- ${String(h).slice(0, 160)}`).join('\n') || '- (nothing yet)';
+  const content = `Subscription to cancel: ${String(b.name || '').slice(0, 80)} (${String(b.company || b.name || '').slice(0, 80)}), ${String(b.price || '').slice(0, 40)}.
+How it is usually cancelled: ${String(b.how || 'unknown').slice(0, 300)}
+Done so far:\n${history}
+Page address: ${String(page.url || '').slice(0, 300)}
+Page title: ${String(page.title || '').slice(0, 150)}
+A password field is on the page: ${page.hasPassword ? 'yes' : 'no'}
+Visible text:\n${String(page.text || '').slice(0, 5000)}
+Clickable elements:\n${lines.join('\n')}`;
+  const res = await fetch(ANTHROPIC_URL, {
+    method: 'POST',
+    headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2026-10-21', 'content-type': 'application/json' },
+    body: JSON.stringify({ model: MODEL, max_tokens: 300, system: CANCEL_AGENT, messages: [{ role: 'user', content }] }),
+  });
+  if (!res.ok) throw new Error(`anthropic ${res.status}: ${await res.text()}`);
+  const out = await res.json();
+  const text = (out.content || []).filter((x) => x.type === 'text').map((x) => x.text).join('');
+  const m = text.match(/\{[\s\S]*\}/);
+  let j = {};
+  try { j = m ? JSON.parse(m[0]) : {}; } catch { j = {}; }
+  const actions = ['click', 'confirm_final', 'need_user', 'wait', 'done', 'failed'];
+  const action = actions.includes(j.action) ? j.action : 'failed';
+  const id = Number.isInteger(j.id) && els.some((e) => Number(e.id) === j.id) ? j.id : null;
+  if ((action === 'click' || action === 'confirm_final') && id === null) return { action: 'failed', id: null, say: 'I could not tell what to press next.', why: 'no element' };
+  return { action, id, say: typeof j.say === 'string' ? j.say.slice(0, 240) : '', why: typeof j.why === 'string' ? j.why.slice(0, 120) : '' };
+}
+
 /// How to cancel a subscription with this company: an email address that takes
 /// cancellations, the cancel page, and where each was found. Web search only,
 /// no user data is sent: just the name as it appears on a statement.
@@ -892,6 +937,12 @@ export default async function handler(req, res) {
 
   if (!process.env.ANTHROPIC_API_KEY) {
     return res.status(503).json({ error: 'Ask is not configured yet.' });
+  }
+
+  // Cancel it for me: the next step on the page the person is looking at, signed in themselves.
+  if (req.body?.mode === 'cancel_step') {
+    try { return res.status(200).json(await nextCancelStep(req.body || {})); }
+    catch (err) { console.error('[ask] cancel_step', err.message); return res.status(502).json({ error: 'Could not work out the next step just now.' }); }
   }
 
   // Cancel help: where this company takes cancellations, found by a web search.
