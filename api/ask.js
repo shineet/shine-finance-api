@@ -1045,6 +1045,87 @@ Clickable elements:\n${lines.join('\n')}`;
   return { action, id, option, say: typeof j.say === 'string' ? j.say.slice(0, 240) : '', why: typeof j.why === 'string' ? j.why.slice(0, 120) : '' };
 }
 
+const SCORE_AGENT = `You find and READ the person's credit score on a bank or credit site, in a browser inside their finance app. The person signed in themselves and is watching every step. You only look; you change nothing.
+Each turn you get the page (address, title, visible text with dollar amounts and long numbers blanked as [n]) and its clickable elements, each with an id, plus what you already did. Choose exactly ONE action.
+Actions:
+- "click": click element id to move toward the credit score (a "Credit score", "FICO Score", "MyCredit Guide", "Credit Journey", "View score", "See details" link, a menu, a tab, "Account services", "Tools"). Also to reach the sign-in page when plainly signed out.
+- "found": the score itself is on this page as a number. Give "score" (the number, as written on the page), "model" (e.g. "FICO Score 8", "FICO Bankcard Score 8", "VantageScore 3.0", or "" if not named), "bureau" ("Experian", "Equifax", "TransUnion" or ""), and "as_of" (the date it is from, YYYY-MM-DD, or "" if not shown). Only a number the page clearly calls a credit score.
+- "sign_in": signed out and no sign-in link or menu is visible.
+- "need_user": the page wants the person: a sign-in form, a verification code, a security question, a puzzle or "verify you are human", choosing an account, accepting terms to turn on a score service, or enrolling. Say what they need to do.
+- "desktop": the page says to use a computer, or the phone page has no menu to the score.
+- "wait": the page is still loading.
+- "failed": the score is not available here, or you cannot find a way. Say why in "say".
+Rules: never apply for anything, accept an offer, enrol in or turn on monitoring, agree to terms, change a setting, move money, dispute anything, or sign out. Never type anything. If turning the score on needs the person's agreement, use need_user and say so. Do not repeat a click that did not change the page. Ignore advertised scores in offers ("people with scores above 700...") and score ranges ("300-850"): only the person's own score counts.
+Hints: Citi shows "YOUR CREDIT SCORE" with a FICO Bankcard Score 8 on the account dashboard after sign-in. American Express: Account or menu, then "MyCredit Guide". Bank of America: "FICO Score" in the menu or under Tools & Investing / Credit. Chase: "Credit Journey" in the menu or on the dashboard. Credit Karma: the overview after sign-in.
+Answer with ONLY a JSON object: {"action": "...", "id": number or null, "score": number or null, "model": "", "bureau": "", "as_of": "", "say": "one short sentence for the person", "why": "a few words"}.`;
+
+/// Long numbers and dollar amounts never reach the model: bank pages show
+/// balances and account numbers, and a score has three digits.
+function blank(t) {
+  return String(t || '')
+    .replace(/\$\s?[\d,]+(\.\d+)?/g, '[n]')                       // dollar amounts
+    .replace(/\d{1,3}(,\d{3})+(\.\d+)?/g, '[n]')                       // 1,234 and 12,345.67
+    .replace(/\d{4,}/g, (m) => (/^(19[9]\d|20[0-3]\d)$/.test(m) ? m : '[n]')); // account numbers; a year stays
+}
+
+async function nextScoreStep(b) {
+  const page = b.page || {};
+  const els = (Array.isArray(page.elements) ? page.elements.slice(0, 150) : []).map((e) => ({ ...e, text: blank(e.text), href: e.href ? String(e.href).replace(/\d{4,}/g, '[n]') : '' }));
+  const lines = els.map((e) => `[${Number(e.id)}] ${String(e.tag || '').slice(0, 10)}${e.role ? '/' + String(e.role).slice(0, 12) : ''}: ${String(e.text || '').slice(0, 80)}${e.href ? ' -> ' + String(e.href).slice(0, 100) : ''}`);
+  const text = blank(page.text).slice(0, 5000);
+  const history = (Array.isArray(b.history) ? b.history.slice(-12) : []).map((h) => `- ${String(h).slice(0, 160)}`).join('\n') || '- (nothing yet)';
+  const content = `Find the credit score on: ${String(b.company || '').slice(0, 60)}.
+Done so far:\n${history}
+Page address: ${String(page.url || '').replace(/\d{4,}/g, '[n]').slice(0, 300)}
+Page title: ${String(page.title || '').slice(0, 150)}
+A password field is on the page: ${page.hasPassword ? 'yes' : 'no'}
+Visible text:\n${text}
+Clickable elements:\n${lines.join('\n')}`;
+  const ask = async (extra) => {
+    const res = await fetch(ANTHROPIC_URL, {
+      method: 'POST',
+      headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2026-10-21', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: MODEL, max_tokens: 1024, system: SCORE_AGENT, messages: [{ role: 'user', content: content + extra }] }),
+    });
+    if (!res.ok) throw new Error(`anthropic ${res.status}: ${await res.text()}`);
+    const out = await res.json();
+    return (out.content || []).filter((x) => x.type === 'text').map((x) => x.text).join('');
+  };
+  let out = await ask('');
+  if (!/\{[\s\S]*"action"[\s\S]*\}/.test(out)) out = await ask('\n\nAnswer now with ONLY the JSON object described, starting with { and nothing else.');
+  let j = {};
+  try { const m = out.match(/\{[\s\S]*\}/); j = m ? JSON.parse(m[0]) : {}; } catch { j = {}; }
+  const said = String(j.action || '').toLowerCase();
+  const alias = { press: 'click', tap: 'click', open: 'click', login: 'sign_in', signin: 'sign_in', done: 'found', score: 'found' };
+  const actions = ['click', 'found', 'need_user', 'sign_in', 'desktop', 'wait', 'failed'];
+  let action = actions.includes(said) ? said : alias[said] || 'failed';
+  const n = Number(j.id);
+  const id = Number.isInteger(n) && els.some((e) => Number(e.id) === n) ? n : null;
+  if (action === 'click' && id === null) return { action: 'failed', id: null, say: 'I could not tell what to press next.', why: 'no element' };
+  let score = null;
+  if (action === 'found') {
+    score = Math.round(Number(j.score));
+    // Only a real score, and only one the page actually shows.
+    const onPage = new RegExp(`(^|\\D)${score}(\\D|$)`).test(text);
+    if (!Number.isFinite(score) || score < 250 || score > 900 || !onPage) {
+      console.log('[score_step] rejected', JSON.stringify({ score: Number.isFinite(score) ? 'out of range or not on page' : 'none' }));
+      action = 'failed';
+      score = null;
+      j.say = 'I saw something like a score but could not confirm it on the page.';
+    }
+  }
+  let host = ''; try { host = new URL(String(page.url || '')).host; } catch {}
+  const label = id === null ? '' : String(els.find((e) => Number(e.id) === id)?.text || '').slice(0, 60);
+  console.log('[score_step]', JSON.stringify({ host, action, label, why: String(j.why || '').slice(0, 80), step: (b.history || []).length, found: score != null }));
+  const clean = (v, max) => (typeof v === 'string' ? v.replace(/[^\w .,'/()-]/g, '').slice(0, max) : '');
+  return {
+    action, id,
+    score, model: clean(j.model, 40), bureau: clean(j.bureau, 20),
+    as_of: /^\d{4}-\d{2}-\d{2}$/.test(String(j.as_of || '')) ? j.as_of : '',
+    say: typeof j.say === 'string' ? j.say.slice(0, 240) : '', why: typeof j.why === 'string' ? j.why.slice(0, 120) : '',
+  };
+}
+
 /// How to cancel a subscription with this company: an email address that takes
 /// cancellations, the cancel page, and where each was found. Web search only,
 /// no user data is sent: just the name as it appears on a statement.
@@ -1178,6 +1259,12 @@ export default async function handler(req, res) {
   }
 
   // Cancel it for me: the next step on the page the person is looking at, signed in themselves.
+  // Read my credit score: the same in-app browser as cancelling, looking only.
+  if (req.body?.mode === 'score_step') {
+    try { return res.status(200).json(await nextScoreStep(req.body || {})); }
+    catch (err) { console.error('[ask] score_step', err.message); return res.status(502).json({ error: 'Could not work out the next step just now.' }); }
+  }
+
   if (req.body?.mode === 'cancel_step') {
     try { return res.status(200).json(await nextCancelStep(req.body || {})); }
     catch (err) { console.error('[ask] cancel_step', err.message); return res.status(502).json({ error: 'Could not work out the next step just now.' }); }
