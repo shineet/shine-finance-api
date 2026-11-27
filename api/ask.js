@@ -28,6 +28,7 @@ import { cleanHistory, splitFollowups } from '../lib/askHistory.js';
 import { accountBook } from '../lib/accounts.js';
 import { moneyMap } from '../lib/moneymap.js';
 import { runCashPlan } from '../lib/cashplan.js';
+import { buildPlan } from '../lib/payoffplan.js';
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const MODEL = process.env.ASK_MODEL || 'claude-sonnet-5-5';
@@ -49,6 +50,7 @@ You have tools that see their REAL financial data. Reach for them instead of giv
 - get_spending: spending broken down by category, optionally versus the previous period. Use for where their money goes, biggest expenses, spending on a category, or whether spending rose or fell.
 - get_subscriptions: recurring charges and subscriptions, with the monthly total and any that went up. Use for what they are subscribed to, recurring charges, or finding things to cancel.
 - get_bills: money due soon, ACCOUNT BY ACCOUNT: every bill, subscription and card payment with the account it comes out of, every payday with the account it lands in, each cash account run forward day by day, where one runs short (date, cause, amount), which account can cover it, and charges set to go on a card with no room left. Use for what is due, upcoming bills, whether they can cover them, or which account to move money into.
+- make_payoff_plan: builds a month-by-month plan to clear their credit cards (optionally loans too) from a goal: a number of months ("in 8 months", "by July") or an amount a month ("I can pay $6,000 a month"). It says whether that fits the money they have each month, how much a month it needs, when each card clears, the total interest, what to cut to close a gap, and how the same debts go at the money they actually have. Use it for any "can I pay off", "how long to clear", "make me a plan" question.
 - get_my_setup: what the person told the app: their cash cushion, scheduled payments (tuition and the like), expected one-off income, homes, cars and leases they added, loans, their goals, which employers pay them, and bills they added by hand. Use for questions about their plan, goals, leases, the cushion, or anything they set up in MyFinance.
 - get_net_worth_trend: how net worth has changed over time. Use for whether it is going up, how it changed over a period, or progress.
 - search_transactions: what they bought, paid, earned or spent, or a specific charge. Amounts are signed: negative is money out (spending), positive is money in.
@@ -61,6 +63,9 @@ Rules:
 - A move between two banks takes one to three business days by ordinary transfer; Zelle is usually minutes. Say "before" the date with a business day to spare.
 - If a charge is set to go on a card with no room left, say so and suggest paying it from a bank account instead.
 - Card payments: the tools say which account paid each card recently. Say "usually paid from" since the person chooses each time.
+- After make_payoff_plan, NEVER read the table out or list the months. Give the headline in two or three short sentences: whether it is doable, how much a month, when it finishes (and if not doable, the gap and the one or two biggest things that would close it, or how long it takes at the money they have). Then ask exactly: "I've made the full plan. Shall I open it so you can read it, or save it to your files?" The app shows Open and Save buttons for it.
+- When they reply "open it", "show me", "save it" or similar to that question, the app does it; you will not be asked.
+- If a month-by-month figure is asked for later, give that one figure, not the table.
 - You can only ever see THIS person's data. If they ask about someone else's finances, say you can only look at their own accounts.
 - Never invent a number, transaction, or date. If a tool returns nothing, say so plainly.
 - Keep answers short. Lead with the direct answer. Use a few bullets only when listing. Do not dump every field; the app shows matching transactions beneath your answer.
@@ -145,6 +150,21 @@ const TOOLS = [
       type: 'object',
       properties: {
         days: { type: 'integer', description: 'How many days ahead to look, 1 to 90. Default 14.' },
+      },
+    },
+  },
+  {
+    name: 'make_payoff_plan',
+    description:
+      "Build a month-by-month plan to clear the person's credit cards (and loans if asked) from a goal: either a number of months or an amount a month. Returns whether it fits their monthly money, the monthly amount needed, the gap if any, the month it finishes, when each debt clears, total interest, the same debts at the money they actually have, things to cut with monthly figures, and how the monthly money was estimated (income, regular spending, one-offs left out). The full schedule goes to the app for the person to open or save; do not read it out.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        months: { type: 'integer', description: 'Clear the debts within this many months, 1 to 120. Turn "by July" into a month count from today.' },
+        monthly: { type: 'number', description: 'Or: put this many dollars a month toward the debts.' },
+        include_loans: { type: 'boolean', description: 'Also include personal loans (not the mortgage). Default false: cards only.' },
+        treat_as_one_off: { type: 'array', items: { type: 'string' }, description: 'Words from charges the person says will not repeat (e.g. "painting", "UTD", "IRS"): left out of regular spending. Use when they tell you something was a one-off, or when a large regular charge in the estimate is plainly not monthly and they agree.' },
+        extra_a_month: { type: 'number', description: 'Money a month the person says they will free up by cutting back, added to what is available.' },
       },
     },
   },
@@ -583,6 +603,90 @@ async function runBills(user, input) {
     expected_income_you_entered: expected,
     cushion: m.cushion,
     note: 'Amounts are the usual or last charge, and card payments are the minimum from the account that paid that card most recently: estimates. Everyday spending (groceries, fuel, eating out) is not included, so real balances run lower. Scheduled payments and expected income the person entered have no account, so they are listed apart and not placed in an account.',
+  };
+}
+
+/// How much a month could go to debts: regular income less regular spending
+/// over the last 90 days. Card payments and moves between their own accounts
+/// are not spending; a big charge seen once (a tax bill, a repair) is left out
+/// and listed, so the estimate is a normal month.
+async function estimateMonthly(user, m, oneOffWords = []) {
+  const since = isoDaysAgo(90);
+  const cardPay = /payment to .*card|card ending|crd|credit card|ach pmt|epay|autopay|payment thank you|mobile payment|online payment/i;
+  const key = (n) => String(n || '').toLowerCase().replace(/[^a-z ]+/g, ' ').split(/\s+/).filter((w) => w.length > 2).slice(0, 3).join(' ');
+  const outs = m.rows.filter((r) => r.date >= since && Number(r.amount) < 0 && !String(r.category || '').startsWith('TRANSFER')
+    && !(r.category === 'LOAN_PAYMENTS' && cardPay.test(r.name || '')));
+  const seen = new Map();
+  for (const r of outs) seen.set(key(r.name), (seen.get(key(r.name)) || 0) + 1);
+  const told = oneOffWords.map((w) => String(w).toLowerCase().trim()).filter(Boolean);
+  const oneOffs = outs.filter((r) => (-Number(r.amount) >= 2500 && seen.get(key(r.name)) < 2) || told.some((w) => String(r.name || '').toLowerCase().includes(w)));
+  const regular = outs.filter((r) => !oneOffs.includes(r));
+  const spending = regular.reduce((t, r) => t - Number(r.amount), 0) / 3;
+  const income = m.income.reduce((t, s) => t + monthlyEquivalent(s.average_amount, s.frequency), 0);
+  const big = {};
+  for (const r of regular.filter((r) => -Number(r.amount) >= 1500)) { const k = r.name.slice(0, 40); big[k] = (big[k] || 0) - Number(r.amount); }
+  return {
+    available: income > 0 ? income - spending : null,
+    income: round2(income),
+    regular_spending: round2(spending),
+    one_offs_left_out: oneOffs.map((r) => ({ date: r.date, name: r.name, amount: round2(-r.amount) })),
+    large_regular_charges: Object.entries(big).map(([name, total]) => ({ name, about_monthly: round2(total / 3) })).sort((a, b) => b.about_monthly - a.about_monthly).slice(0, 8),
+    note: 'Regular income less regular spending over the last 90 days. Card payments and transfers between your own accounts are not spending; a big charge seen only once is left out. Large charges that came twice or more (tuition, a contractor) count as regular: if one was a one-off, there is more each month than this.',
+  };
+}
+
+/// Things that could be cut, with what they cost a month (last 90 days).
+async function findCuts(user, m) {
+  const since = isoDaysAgo(90);
+  const outs = m.rows.filter((r) => r.date >= since && Number(r.amount) < 0);
+  const sum = (re, not) => outs.filter((r) => re.test(r.name || '') && !(not && not.test(r.name || ''))).reduce((t, r) => t - Number(r.amount), 0) / 3;
+  const cuts = [
+    { name: 'Food delivery (DoorDash, Uber Eats, Grubhub, Instacart)', monthly: sum(/doordash|uber\s*eats|grubhub|instacart|postmates/i), kind: 'spending' },
+    { name: 'Amazon shopping', monthly: sum(/amazon|amzn/i, /prime video|prime membership|kindle|amazon prime\b/i), kind: 'spending' },
+    { name: 'Rides (Uber, Lyft)', monthly: sum(/\buber\b|lyft/i, /eats/i), kind: 'spending' },
+    { name: 'Restaurants and coffee', monthly: outs.filter((r) => r.category === 'FOOD_AND_DRINK' && !/doordash|uber|grubhub|instacart|h-e-b|heb|costco|walmart|kroger|whole foods|trader/i.test(r.name || '')).reduce((t, r) => t - Number(r.amount), 0) / 3, kind: 'spending' },
+  ].filter((c) => c.monthly >= 40).map((c) => ({ ...c, monthly: round2(c.monthly), if_halved: round2(c.monthly / 2) }));
+  try {
+    const subs = (await loadDetected(user)).filter((s) => s.kind === 'subscription' && s.is_active);
+    for (const s of subs.map((s) => ({ name: s.known_as ? `${s.description} (${s.known_as})` : s.description, monthly: round2(monthlyOf(s)), kind: 'subscription' })).sort((a, b) => b.monthly - a.monthly).slice(0, 8)) {
+      if (s.monthly >= 10) cuts.push(s);
+    }
+  } catch {}
+  return cuts.sort((a, b) => b.monthly - a.monthly);
+}
+
+/// The plan tool. Returns { forModel, plan }: the plan goes to the app whole.
+async function runPayoffPlan(user, input) {
+  const m = await moneyMap(user, { days: 400 });
+  const terms = await (await import('../lib/moneymap.js')).cardTerms(user).catch(() => new Map());
+  const debts = [];
+  for (const a of m.book.values()) {
+    if (a.type === 'credit' && Number(a.current) > 1) {
+      const t = terms.get(a.id) || {};
+      debts.push({ name: a.label, balance: Number(a.current), apr: t.apr ?? null, minimum: t.minimum || null });
+    }
+    if (input.include_loans && a.type === 'loan' && a.subtype !== 'mortgage' && Number(a.current) > 1) {
+      debts.push({ name: a.label, balance: Number(a.current), apr: null, minimum: null });
+    }
+  }
+  if (!debts.length) return { forModel: { message: 'No card balances to pay off.' }, plan: null };
+  const est = await estimateMonthly(user, m, Array.isArray(input.treat_as_one_off) ? input.treat_as_one_off : []);
+  if (est.available != null && Number(input.extra_a_month) > 0) { est.available += Number(input.extra_a_month); est.extra_you_said_you_would_free_up = Number(input.extra_a_month); }
+  if (est.available != null && est.available <= 0) est.warning = 'At the last 90 days of spending nothing is left over for the debts each month. Check the large regular charges: anything there that will not repeat can be treated as a one-off.';
+  const held = {};
+  for (const x of m.scheduled) if (x.date && x.amount > 0) held[x.date.slice(0, 7)] = (held[x.date.slice(0, 7)] || 0) + Number(x.amount);
+  const notes = [];
+  if (debts.some((d) => d.apr == null)) notes.push('Some rates were not reported by the bank, so those debts are counted at 0% interest. Add the rate in Debt to make this exact.');
+  notes.push('Everyday spending is assumed to stay as it was over the last 90 days, and nothing new goes on the cards.');
+  if (Object.keys(held).length) notes.push('Scheduled payments you entered are set aside in the month they fall.');
+  const goal = input.months ? { months: input.months } : input.monthly ? { monthly: input.monthly } : { monthly: Math.max(0, est.available || 0) };
+  const cuts = await findCuts(user, m);
+  const plan = buildPlan(debts, goal, { available: est.available, held, cuts, notes });
+  plan.estimate = est;
+  const { schedule, ...summary } = plan;
+  return {
+    forModel: { ...summary, schedule_months: schedule.length, first_month: schedule[0] || null, note: 'The full month-by-month schedule has been sent to the app. Do not read it out.' },
+    plan,
   };
 }
 
@@ -1063,6 +1167,7 @@ export default async function handler(req, res) {
   // Earlier turns, kept by the app, come first. Stateless here: nothing is stored.
   const messages = [...cleanHistory(req.body?.history), { role: 'user', content: question }];
   const shown = new Map(); // transaction_id -> full row, in search order
+  let plan = null; // a pay-off plan built this turn, sent to the app whole
   let nudged = false;      // whether we've already asked it to summarise
 
   try {
@@ -1161,6 +1266,14 @@ export default async function handler(req, res) {
             } catch (err) {
               results.push({ type: 'tool_result', tool_use_id: block.id, content: `bills failed: ${err.message}`, is_error: true });
             }
+          } else if (block.name === 'make_payoff_plan') {
+            try {
+              const out = await runPayoffPlan(user, block.input || {});
+              if (out.plan) plan = out.plan;
+              results.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(out.forModel) });
+            } catch (err) {
+              results.push({ type: 'tool_result', tool_use_id: block.id, content: `plan failed: ${err.message}`, is_error: true });
+            }
           } else if (block.name === 'get_my_setup') {
             try {
               const setup = await runMySetup(user);
@@ -1223,6 +1336,7 @@ export default async function handler(req, res) {
         followups: split.followups,
         sources,
         transactions,
+        ...(plan ? { plan } : {}),
       });
     }
 
