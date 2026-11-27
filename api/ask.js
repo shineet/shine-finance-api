@@ -25,10 +25,13 @@ import { plaid, listItems } from '../lib/plaid.js';
 import { sbHeaders, rest, forUser } from '../lib/db.js';
 import { loadDetected } from '../lib/detected.js';
 import { cleanHistory, splitFollowups } from '../lib/askHistory.js';
+import { accountBook } from '../lib/accounts.js';
+import { moneyMap } from '../lib/moneymap.js';
+import { runCashPlan } from '../lib/cashplan.js';
 
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const MODEL = process.env.ASK_MODEL || 'claude-sonnet-5-5';
-const MAX_TURNS = 6;
+const MAX_TURNS = 8;
 
 const SYSTEM = `You are the "Ask" assistant inside MyFinance, a personal finance app. You answer questions about the signed-in person's own money, in a warm, plain, concise way. Today is ${new Date().toISOString().slice(0, 10)}.
 
@@ -42,16 +45,22 @@ You have tools that see their REAL financial data. Reach for them instead of giv
 - get_balances: how much they have right now -- cash, credit-card debt, investments, net worth, available credit, and each account. Call this BEFORE giving any advice about what to do with cash, savings or debt, or any question about their overall position, so the answer fits their actual numbers.
 - get_investments: whether their investments are doing well -- total value, cost basis, unrealized gain and percent, each holding's gain, and the recorded balance trend. Use for any question about investment returns, performance, gains or losses, or a specific holding. Lead with the real gain or percent rather than generic market averages; mention the note if cost basis is only partial.
 - get_debt: credit-card debt with APR, minimum payment, due date and the avalanche payoff order. Use for paying down debt, which card first, payoff timelines, due dates or minimums. Quote the real APRs.
-- get_cashflow: monthly income, spending and surplus. Use for how much they earn or make, whether they spend more than they earn, or what is left over each month.
+- get_cashflow: monthly income, spending and surplus, plus each payday (who pays, how often, the usual amount, the next date and the account it lands in). Use for how much they earn or make, when they get paid, whether they spend more than they earn, or what is left over each month.
 - get_spending: spending broken down by category, optionally versus the previous period. Use for where their money goes, biggest expenses, spending on a category, or whether spending rose or fell.
 - get_subscriptions: recurring charges and subscriptions, with the monthly total and any that went up. Use for what they are subscribed to, recurring charges, or finding things to cancel.
-- get_bills: money due soon (card due dates and recurring bills within a window). Use for what is due, upcoming bills, next payment, or whether they can cover what is due before payday.
+- get_bills: money due soon, ACCOUNT BY ACCOUNT: every bill, subscription and card payment with the account it comes out of, every payday with the account it lands in, each cash account run forward day by day, where one runs short (date, cause, amount), which account can cover it, and charges set to go on a card with no room left. Use for what is due, upcoming bills, whether they can cover them, or which account to move money into.
+- get_my_setup: what the person told the app: their cash cushion, scheduled payments (tuition and the like), expected one-off income, homes, cars and leases they added, loans, their goals, which employers pay them, and bills they added by hand. Use for questions about their plan, goals, leases, the cushion, or anything they set up in MyFinance.
 - get_net_worth_trend: how net worth has changed over time. Use for whether it is going up, how it changed over a period, or progress.
 - search_transactions: what they bought, paid, earned or spent, or a specific charge. Amounts are signed: negative is money out (spending), positive is money in.
 - web_search: general knowledge the app does not hold (what a merchant or company is, e.g. "what is DistroKid"). If the name also appears in their transactions, you may search those too to tie it to a charge.
 
 Rules:
 - Prefer their real numbers over generic guidance. If they ask what to do with spare cash, call get_balances (and search_transactions for their spending if it helps) and tailor the plan to their actual cash, card debt and balances. NEVER say you cannot see their balances -- you can, via get_balances.
+- Always say WHICH account. Name it the way the tools do ("Bank of America checking ending 1234"), never just "checking".
+- When money is due, answer with what to DO: which payment, which account it comes out of, whether that account will have enough on the day, and if not, how much to move, from which account, and by when. For example: "Your car payment of $450 comes out of Bank of America checking ending 1234 on the 29th. It has enough. Your mortgage on the 2nd comes out of Chase checking ending 5678, which will be about $300 short even after Monday's salary, so move $300 from Bank of America before Tuesday." Use get_bills for this; its moves list says how much and from where.
+- A move between two banks takes one to three business days by ordinary transfer; Zelle is usually minutes. Say "before" the date with a business day to spare.
+- If a charge is set to go on a card with no room left, say so and suggest paying it from a bank account instead.
+- Card payments: the tools say which account paid each card recently. Say "usually paid from" since the person chooses each time.
 - You can only ever see THIS person's data. If they ask about someone else's finances, say you can only look at their own accounts.
 - Never invent a number, transaction, or date. If a tool returns nothing, say so plainly.
 - Keep answers short. Lead with the direct answer. Use a few bullets only when listing. Do not dump every field; the app shows matching transactions beneath your answer.
@@ -131,13 +140,19 @@ const TOOLS = [
   {
     name: 'get_bills',
     description:
-      "List money going out soon: credit-card payment due dates (with the minimum) and recurring bills predicted to hit within the next N days (default 14), sorted by date, with a total. Use for 'what's due', 'what bills are coming up', 'when is my next payment', or 'do I have enough before payday'.",
+      "Money in and out over the next N days (default 14), account by account. Returns: due (every bill, subscription and card payment with its date, amount and the account it comes out of), paydays (each with the account it lands in), cards_due (minimum, statement balance and the account usually used to pay it), accounts (each cash account's balance now, its lowest point and date, and what it can spare), shortfalls (an account that drops below zero or the cushion: when, which payment causes it, how much is needed), moves (how much to move from which account to which, and by when) and card_problems (charges set to go on a card with no room left). Use for 'what's due', 'what bills are coming up', 'from which account', 'do I have enough', or 'where should I move money'.",
     input_schema: {
       type: 'object',
       properties: {
         days: { type: 'integer', description: 'How many days ahead to look, 1 to 90. Default 14.' },
       },
     },
+  },
+  {
+    name: 'get_my_setup',
+    description:
+      "Read what the person set up in MyFinance themselves: the cash cushion they never want to dip into, scheduled payments (date, amount, what for), expected one-off income, homes, cars, leases and loans they added (value, what is owed, monthly payment), goals (savings or pay-off, target, deadline), employers that pay them, bills added by hand, and card rates they typed in. Use for their goals, plan, leases, cushion, or anything they entered in the app.",
+    input_schema: { type: 'object', properties: {} },
   },
   {
     name: 'get_net_worth_trend',
@@ -268,11 +283,12 @@ function monthlyEquivalent(amount, frequency) {
 /// current balance (from the snapshot), APR, minimum payment and due date
 /// (live from Plaid's liabilities product), plus an avalanche payoff order.
 async function runDebt(user) {
-  const { rows: snap } = await latestSnapshots(user);
+  const [{ rows: snap }, book] = await Promise.all([latestSnapshots(user), accountBook(user).catch(() => new Map())]);
   const cards = new Map(); // account_id -> card
   for (const a of snap) {
     if (a.type !== 'credit') continue;
     cards.set(a.account_id, {
+      account: book.get(a.account_id)?.label || null,
       name: a.name,
       institution: a.institution,
       balance: round2(a.current),
@@ -376,13 +392,29 @@ async function runCashflow(user) {
   }
   const spendingPerMonth = round2(out90 / 3);
   const depositsPerMonth = round2(in90 / 3);
-  const income = hasRecurring ? round2(regularIncome) : depositsPerMonth;
+
+  // Paydays: the banks' streams, or found in the transactions (the same
+  // detection the Plan screen uses), each with the account it lands in.
+  let paydays = [];
+  try {
+    const m = await moneyMap(user, { days: 45 });
+    paydays = m.income.map((s) => ({
+      from: s.payer || s.description, how_often: s.frequency, usual_amount: round2(s.average_amount),
+      last_paid: s.last_date, next: s.predicted_next_date, lands_in: m.label(s.account_id),
+    }));
+    if (!hasRecurring && paydays.length) {
+      hasRecurring = true;
+      regularIncome = m.income.reduce((t, s) => t + monthlyEquivalent(s.average_amount, s.frequency), 0);
+    }
+  } catch {}
+  const income2 = hasRecurring ? round2(regularIncome) : depositsPerMonth;
 
   return {
+    paydays,
     regular_monthly_income: hasRecurring ? round2(regularIncome) : null,
     all_deposits_per_month: depositsPerMonth,
     spending_per_month: spendingPerMonth,
-    estimated_monthly_surplus: round2(income - spendingPerMonth),
+    estimated_monthly_surplus: round2(income2 - spendingPerMonth),
     income_basis: hasRecurring ? 'detected recurring deposits (salary)' : 'average of all deposits over 90 days',
     window: 'spending and deposits averaged over the last 90 days; transfers between your own accounts and card/loan payments are excluded',
   };
@@ -483,9 +515,10 @@ async function fetchRecurringOutflows(user) {
 /// price on a steady schedule, still charged), the same list as the app's
 /// Subscriptions screen. Bills are listed apart, never mixed in.
 async function runSubscriptions(user) {
-  const all = await loadDetected(user);
+  const [all, book] = await Promise.all([loadDetected(user), accountBook(user).catch(() => new Map())]);
   const shape = (s) => ({
     name: s.description,
+    paid_from: book.get(s.account_id)?.label || null,
     probably: s.known_as || null,
     about: s.about || null,
     amount: s.average_amount,
@@ -515,65 +548,71 @@ async function runSubscriptions(user) {
 
 const monthlyOf = (s) => s.average_amount * ({ WEEKLY: 52 / 12, BIWEEKLY: 26 / 12, MONTHLY: 1, QUARTERLY: 1 / 3, SEMI_ANNUALLY: 1 / 6, ANNUALLY: 1 / 12 }[s.frequency] ?? 1);
 
-/// Money going out in the near future: card payment due dates plus recurring
-/// bills predicted to hit within the window.
+/// Money in and out over the next N days, account by account: each bill in the
+/// account it comes out of, each payday in the account it lands in, each cash
+/// account run forward, where one runs short, and what to move from where.
+/// Shine (2026-11-26): "it should say your bill will hit this account and it
+/// does not have the money; move funds from the other bank before then".
 async function runBills(user, input) {
   const days = Math.min(Math.max(parseInt(input.days, 10) || 14, 1), 90);
-  const horizon = isoDaysAgo(-days); // today + days
-  const today = isoDaysAgo(0);
-  const upcoming = [];
-
-  try {
-    const debt = await runDebt(user);
-    for (const c of debt.cards) {
-      if (!c.due_date) continue;
-      if (c.due_date <= horizon && (c.days_until_due == null || c.days_until_due >= -5)) {
-        upcoming.push({
-          date: c.due_date,
-          name: `${c.name || c.institution || 'Card'} payment`,
-          amount: c.minimum_payment,
-          kind: 'card minimum payment',
-          days_until: c.days_until_due,
-          overdue: !!c.is_overdue,
-        });
-      }
-    }
-  } catch {
-    // Liabilities unavailable; recurring bills below still populate the list.
-  }
-
-  try {
-    let streams = await fetchRecurringOutflows(user);
-    // The banks' own detection said nothing: use what the transactions show.
-    if (!streams.length) {
-      streams = (await loadDetected(user)).filter((s) => s.is_active).map((s) => ({
-        name: s.description, average: s.average_amount, last_amount: s.last_amount,
-        next_date: s.predicted_next_date, category: s.category,
-      }));
-    }
-    for (const s of streams) {
-      if (s.next_date && s.next_date >= today && s.next_date <= horizon) {
-        upcoming.push({
-          date: s.next_date,
-          name: s.name,
-          amount: s.last_amount || s.average,
-          kind: 'recurring bill',
-          days_until: Math.round((new Date(s.next_date) - new Date()) / 864e5),
-          category: s.category,
-        });
-      }
-    }
-  } catch {
-    // Recurring unavailable; card dues above still populate the list.
-  }
-
-  upcoming.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-  const total = upcoming.reduce((s, x) => s + (Number(x.amount) || 0), 0);
+  const today = new Date();
+  const m = await moneyMap(user, { days, today });
+  const t0 = today.toISOString().slice(0, 10);
+  const plan = runCashPlan(m.book, m.events, { cushion: m.cushion, today, until: m.end });
+  const due = m.events
+    .filter((e) => e.amount < 0 && e.date >= t0)
+    .sort((x, y) => (x.date < y.date ? -1 : 1))
+    .map((e) => ({ date: e.date, name: e.name, amount: Math.abs(e.amount), kind: e.kind, comes_out_of: m.label(e.account_id) }));
+  const paydays = m.events
+    .filter((e) => e.kind === 'income')
+    .sort((x, y) => (x.date < y.date ? -1 : 1))
+    .map((e) => ({ date: e.date, from: e.name, amount: e.amount, lands_in: m.label(e.account_id) }));
+  const scheduled = m.scheduled.filter((x) => x.date && x.date >= t0 && x.date <= m.end);
+  const expected = m.expected.filter((x) => x.date && x.date >= t0 && x.date <= m.end);
   return {
-    window_days: days,
-    items: upcoming.slice(0, 40),
-    total_due: round2(total),
-    note: 'Card amounts are the minimum payment; recurring amounts are the last or typical charge. Both are estimates.',
+    window: { from: t0, to: m.end, days },
+    due: due.slice(0, 60),
+    total_due: round2(due.reduce((t, x) => t + x.amount, 0)),
+    paydays,
+    cards_due: m.cardsDue,
+    accounts: plan.accounts.map(({ events, ...a }) => a),
+    shortfalls: plan.shortfalls.map(({ account_id, ...s }) => s),
+    moves: plan.moves,
+    card_problems: plan.card_problems,
+    scheduled_payments_you_entered: scheduled,
+    expected_income_you_entered: expected,
+    cushion: m.cushion,
+    note: 'Amounts are the usual or last charge, and card payments are the minimum from the account that paid that card most recently: estimates. Everyday spending (groceries, fuel, eating out) is not included, so real balances run lower. Scheduled payments and expected income the person entered have no account, so they are listed apart and not placed in an account.',
+  };
+}
+
+/// What the person set up in MyFinance themselves.
+async function runMySetup(user) {
+  const { loadPrefs, fromSwift } = await import('../lib/moneymap.js');
+  const p = await loadPrefs(user);
+  const list = (v) => (Array.isArray(v) ? v : []);
+  const assets = list(p.manualAssets).map((a) => {
+    const out = {};
+    for (const [k, v] of Object.entries(a || {})) {
+      if (v == null || k === 'id' || /address|street|zip|photo|image/i.test(k)) continue;
+      out[k] = /date|start|end|since/i.test(k) && typeof v === 'number' ? fromSwift(v) : v;
+    }
+    return out;
+  });
+  const goals = list(p.goals).map((g) => ({
+    name: g.name, kind: g.kind, target: g.target || null, deadline: fromSwift(g.deadline), started_at: g.startAmount ?? null,
+    created: fromSwift(g.created), done_on: fromSwift(g.doneOn),
+  }));
+  return {
+    cash_cushion: typeof p.cashBuffer === 'number' ? p.cashBuffer : p.cashBuffer ?? null,
+    scheduled_payments: list(p.scheduledExpenses).map((x) => ({ label: x.label, amount: x.amount, date: fromSwift(x.date) })),
+    expected_income: list(p.expectedIncome).map((x) => ({ label: x.label, amount: x.amount, date: fromSwift(x.date) })),
+    homes_cars_leases_loans: assets,
+    goals,
+    employers_that_pay_you: p.salaryRule?.employers || null,
+    bills_added_by_hand: list(p.manualBills).map((b) => ({ name: b.name, amount: b.amount, frequency: b.frequency, group: b.group })),
+    card_rates_you_typed: p.manualTerms || null,
+    subscription_marks: p.billVerdicts || null,
   };
 }
 
@@ -740,7 +779,7 @@ async function latestSnapshots(user) {
 }
 
 async function runBalances(user) {
-  const { as_of: newest, rows } = await latestSnapshots(user);
+  const [{ as_of: newest, rows }, book] = await Promise.all([latestSnapshots(user), accountBook(user).catch(() => new Map())]);
   if (!rows.length) return { as_of: null, summary: null, accounts: [] };
 
   const num = (v) => (v == null ? null : Math.round(Number(v) * 100) / 100);
@@ -755,6 +794,7 @@ async function runBalances(user) {
     } else if (a.type === 'investment' || a.type === 'brokerage') investments += cur;
     else if (!isDebt(a.type)) otherAssets += cur;
     return {
+      account: book.get(a.account_id)?.label || null,
       name: a.name,
       institution: a.institution,
       type: a.type,
@@ -810,9 +850,11 @@ async function runSearch(user, input) {
   if (typeof input.max_amount === 'number') rows = rows.filter((t) => Math.abs(Number(t.amount)) <= input.max_amount);
 
   // Compact view for the model: enough to reason and answer, no ids.
+  const book = await accountBook(user).catch(() => new Map());
   const compact = rows.slice(0, limit).map((t) => ({
     date: t.date,
     name: t.name,
+    account: book.get(t.account_id)?.label || t.institution || null,
     amount: Number(t.amount),
     category: t.category_label || t.category || null,
     pending: t.pending || false,
@@ -1118,6 +1160,13 @@ export default async function handler(req, res) {
               results.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(bills) });
             } catch (err) {
               results.push({ type: 'tool_result', tool_use_id: block.id, content: `bills failed: ${err.message}`, is_error: true });
+            }
+          } else if (block.name === 'get_my_setup') {
+            try {
+              const setup = await runMySetup(user);
+              results.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(setup) });
+            } catch (err) {
+              results.push({ type: 'tool_result', tool_use_id: block.id, content: `setup failed: ${err.message}`, is_error: true });
             }
           } else if (block.name === 'get_net_worth_trend') {
             try {

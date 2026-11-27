@@ -11,6 +11,8 @@ import { sbHeaders, rest, forUser } from '../lib/db.js';
 import { detect, explain } from '../lib/subscriptions.js';
 import { identify } from '../lib/merchants.js';
 import { allRows } from '../lib/detected.js';
+import { detectIncome } from '../lib/income.js';
+import { accountBook } from '../lib/accounts.js';
 
 
 
@@ -29,65 +31,6 @@ function shapeStream(s, direction) {
     status: s.status || null,
     category: s.personal_finance_category?.primary || null,
   };
-}
-
-// ── Fallback: infer streams from stored transactions ────────────────────────
-// Groups by merchant name and looks for a steady cadence. Deliberately
-// conservative: it only reports a stream after three sightings, because two
-// coincidental charges are not a pattern.
-function inferStreams(rows) {
-  const byName = new Map();
-  for (const row of rows) {
-    const key = (row.name || '').trim().toLowerCase();
-    if (!key) continue;
-    if (!byName.has(key)) byName.set(key, []);
-    byName.get(key).push(row);
-  }
-
-  const streams = [];
-  for (const [, group] of byName) {
-    if (group.length < 3) continue;
-    group.sort((a, b) => (a.date < b.date ? -1 : 1));
-
-    const gaps = [];
-    for (let i = 1; i < group.length; i++) {
-      const days = (new Date(group[i].date) - new Date(group[i - 1].date)) / 86400000;
-      gaps.push(days);
-    }
-    const avgGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
-    // Reject irregular spacing: a genuine bill lands on a rhythm.
-    const spread = Math.max(...gaps) - Math.min(...gaps);
-    if (spread > Math.max(avgGap * 0.6, 6)) continue;
-
-    let frequency = null;
-    if (avgGap <= 9) frequency = 'WEEKLY';
-    else if (avgGap <= 18) frequency = 'BIWEEKLY';
-    else if (avgGap <= 45) frequency = 'MONTHLY';
-    else if (avgGap <= 120) frequency = 'QUARTERLY';
-    else frequency = 'ANNUALLY';
-
-    const amounts = group.map((g) => Math.abs(Number(g.amount) || 0));
-    const average = amounts.reduce((a, b) => a + b, 0) / amounts.length;
-    const last = group[group.length - 1];
-    const next = new Date(last.date);
-    next.setDate(next.getDate() + Math.round(avgGap));
-
-    streams.push({
-      id: `inferred:${last.account_id}:${(last.name || '').slice(0, 40)}`,
-      account_id: last.account_id,
-      description: last.name,
-      direction: Number(last.amount) > 0 ? 'inflow' : 'outflow',
-      average_amount: average,
-      last_amount: Math.abs(Number(last.amount) || 0),
-      frequency,
-      last_date: last.date,
-      predicted_next_date: next.toISOString().slice(0, 10),
-      is_active: true,
-      status: 'INFERRED',
-      category: last.category || null,
-    });
-  }
-  return streams;
 }
 
 export default async function handler(req, res) {
@@ -132,10 +75,21 @@ export default async function handler(req, res) {
       try { for (const e of explain(rows, subscriptions)) console.log('[subs-explain]', JSON.stringify(e)); } catch {}
       // Nothing came back from Plaid at all: what was found here is the
       // planner's bills, and income is inferred from the same rows.
-      if (!inflows.length && !outflows.length) {
-        source = 'inferred';
+      // Paydays: when the banks found none, read them from deposits into
+      // checking and savings (one employer's changing IDs, same-day splits and
+      // twice-a-month pay all handled; card credits never count).
+      if (!inflows.length) {
+        const book = await accountBook(user).catch(() => new Map());
+        const cash = new Set([...book.values()].filter((a) => a.type === 'depository').map((a) => a.id));
         const year = rows.filter((r) => Date.now() - new Date(r.date).getTime() <= 365 * 86400000);
-        for (const s of inferStreams(year)) if (s.direction === 'inflow') inflows.push(s);
+        for (const s of detectIncome(year, cash)) {
+          const { payer, is_payroll, paydays_seen, ...stream } = s;
+          inflows.push(stream);
+        }
+        if (inflows.length && source === 'plaid' && !outflows.length) source = 'inferred';
+      }
+      if (!outflows.length) {
+        source = 'inferred';
         for (const s of subscriptions) {
           if (!s.is_active || s.kind === 'topup') continue;
           const { charges, kind, first_date, price_change, institution, known_as, about, ...stream } = s;
