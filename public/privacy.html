@@ -2,14 +2,14 @@
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Privacy Policy</title><meta name="description" content="How MyFinance collects, uses, protects and deletes your data."><link rel="icon" href="/icon.png"><link rel="stylesheet" href="/style.css"></head><body><main>
 <header class="top"><img src="/icon.png" alt=""><a href="/">MyFinance</a></header>
 <h1>Privacy Policy</h1>
-<p class="meta">Effective 23 November 2026. MyFinance is made by Shine Thankappan ("we"). Contact: <a href="mailto:2020shine@gmail.com">2020shine@gmail.com</a></p>
+<p class="meta">Effective 27 November 2026. MyFinance is made by Shine Thankappan ("we"). Contact: <a href="mailto:2020shine@gmail.com">2020shine@gmail.com</a></p>
 <h2>What MyFinance does</h2>
 <p>MyFinance shows you your own finances: balances, transactions, debts, investments and plans, from the bank accounts you choose to connect. It is read-only. It cannot move money or make payments.</p>
 <h2>What we collect</h2>
 <ul>
 <li><strong>Your account:</strong> your Sign in with Apple identifier, and your email address if you choose to share it with us.</li>
 <li><strong>Financial data you connect through Plaid:</strong> account names and balances, transactions, credit card terms (rates, minimum payments, due dates), and investment holdings and transactions.</li>
-<li><strong>Things you enter:</strong> goals, card rates, manual assets and app settings.</li>
+<li><strong>Things you enter:</strong> goals, card rates, manual assets, credit scores you save, which subscriptions you mark to keep or cut, and app settings.</li>
 <li><strong>A push notification token</strong>, if you allow notifications.</li>
 </ul>
 <p>We never see or store your bank username or password. You enter those only into Plaid, our bank connection provider.</p>
@@ -32,6 +32,17 @@
 <p>Aura is the assistant inside the Ask feature: an AI, not a person and not a financial adviser. You can type to her or speak. When you speak, your voice is turned into text on your device only, using Apple's on-device speech recognition; the audio is never recorded, stored or sent anywhere, and only the recognised words are sent, exactly as if you had typed them. Aura's replies can be read aloud on your device, which can be muted in the app: with Apple's voice or, if you choose to download one, a more natural voice that also runs on the device. Downloading a voice fetches its files from huggingface.co, which sees the request as any website would; nothing about you or your finances is sent.</p>
 <p><strong>When Aura is listening.</strong> The ear on Aura's screen can wait there for "Hey Aura", and can be switched off. In MyFinance 1.1 and later on iPhone and iPad, if you turn it on, she can also wait for her name on any screen while MyFinance is in front and unlocked. The waiting is done on your device by recognising the sound of her name, and what is heard while waiting is discarded as it arrives. After an answer to a spoken question she keeps listening for about six seconds for a follow-up, and on iPhone and iPad she can listen while she is speaking so that you can talk over her. MyFinance does not listen when it is not in front. If you set up Apple's Vocal Shortcuts to open Aura from elsewhere, it is Apple's feature that listens. If you use Teach Aura your voice, the recordings are not kept; only a small set of numbers that tunes how she recognises her name stays on your device.</p>
 <p>So that a follow-up question makes sense, the last few messages of your conversation are sent along with each new question, to the same service providers as above and for the same purpose. Conversations are kept on your device, in the app's private storage, and are locked whenever your device is locked. They are not kept on our server. In MyFinance 1.1 and later each visit is a new conversation, and earlier ones are kept for 30 days unless you choose 7 days, a year, or not at all; you can delete any or all of them under the clock on Aura's screen. Disconnecting a bank clears all of them, because answers may be about that account. In MyFinance 1.1 and later so does signing out or deleting your account; in any version, deleting the app removes them. Aura never moves money or changes anything in your accounts.</p>
+<h2>Using a company's website inside MyFinance</h2>
+<p>Two features open a company's own website inside MyFinance and work through it with you: <strong>Cancel it for me</strong>, which helps you cancel a subscription, and <strong>Read it for me</strong>, which finds your credit score on your card issuer's or a credit service's site. You sign in on that company's page yourself. MyFinance does not read what you type into the page's boxes, such as your username or password. The site may keep you signed in inside MyFinance, the way a browser would.</p>
+<p>While a feature is working, the text visible on the page and the names of its buttons and links are sent to our server and to Anthropic, so that Claude can choose the next step. When reading a credit score, dollar amounts and long numbers such as account numbers are removed from the page on your device before it is sent. MyFinance never buys anything or accepts an offer, and it asks you before the final cancel step. A score it finds is saved to your history only when you say yes.</p>
+<h2>Other features</h2>
+<ul>
+<li><strong>What you are looking at.</strong> When you ask Aura something, the app also sends the name of the screen you are on and a short summary of what it shows, such as the figures on a card, so that she can answer about it.</li>
+<li><strong>Payoff plans.</strong> A plan to pay off your cards is worked out on our server from your own data and shown in the app. It is saved to Files only if you choose to save it.</li>
+<li><strong>The web.</strong> Sources Aura cites open inside the app. "See more on the web" runs a Google search of your question, only when you tap it, so Google sees that question.</li>
+<li><strong>Cancellation emails.</strong> You can send a cancellation email with Apple Mail, or from your own mailbox. If you connect your mailbox, its app password is kept only in your device's keychain and is never sent to our server. The email goes from your mailbox straight to the company.</li>
+<li><strong>Scanning a statement or letter.</strong> A photo or screenshot you scan is read on your device. The image is never uploaded. Only the figures you choose to keep are saved, like anything else you enter.</li>
+</ul>
 <h2>How we protect it</h2>
 <p>All connections use HTTPS. Data is encrypted at rest, and bank connection tokens are encrypted again with a key only our server holds. Each person's data is kept separate, so no user can see another's. On your device, the app can require Face ID or Touch ID.</p>
 <h2>Keeping and deleting your data</h2>
