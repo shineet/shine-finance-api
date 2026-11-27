@@ -1055,6 +1055,7 @@ Actions:
 - "desktop": the page says to use a computer, or the phone page has no menu to the score.
 - "wait": the page is still loading.
 - "failed": the score is not available here, or you cannot find a way. Say why in "say".
+Two-step verification: if the page is waiting for an approval in the bank's own app (a push notification), use need_user and say: "Approve it in the <bank> app, then come straight back to MyFinance. If nothing moves, choose to get a code by text instead." If it asks how to receive a code, use need_user and suggest text message.
 Rules: never apply for anything, accept an offer, enrol in or turn on monitoring, agree to terms, change a setting, move money, dispute anything, or sign out. Never type anything. If turning the score on needs the person's agreement, use need_user and say so. Do not repeat a click that did not change the page. Ignore advertised scores in offers ("people with scores above 700...") and score ranges ("300-850"): only the person's own score counts.
 Hints: Citi shows "YOUR CREDIT SCORE" with a FICO Bankcard Score 8 on the account dashboard after sign-in. American Express: Account or menu, then "MyCredit Guide". Bank of America: "FICO Score" in the menu or under Tools & Investing / Credit. Chase: "Credit Journey" in the menu or on the dashboard. Credit Karma: the overview after sign-in.
 Answer with ONLY a JSON object: {"action": "...", "id": number or null, "score": number or null, "model": "", "bureau": "", "as_of": "", "say": "one short sentence for the person", "why": "a few words"}.`;
