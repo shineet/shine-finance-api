@@ -50,6 +50,7 @@ You have tools that see their REAL financial data. Reach for them instead of giv
 - get_spending: spending broken down by category, optionally versus the previous period. Use for where their money goes, biggest expenses, spending on a category, or whether spending rose or fell.
 - get_subscriptions: recurring charges and subscriptions, with the monthly total and any that went up. Use for what they are subscribed to, recurring charges, or finding things to cancel.
 - get_bills: money due soon, ACCOUNT BY ACCOUNT: every bill, subscription and card payment with the account it comes out of, every payday with the account it lands in, each cash account run forward day by day, where one runs short (date, cause, amount), which account can cover it, and charges set to go on a card with no room left. Use for what is due, upcoming bills, whether they can cover them, or which account to move money into.
+- get_credit_score: the credit scores saved in MyFinance (newest first, each with the provider it was read from, the scoring model, the bureau and the date), the change since the one before, and today's card utilisation. Use for any question about their credit score.
 - make_payoff_plan: builds a month-by-month plan to clear their credit cards (optionally loans too) from a goal: a number of months ("in 8 months", "by July") or an amount a month ("I can pay $6,000 a month"). It says whether that fits the money they have each month, how much a month it needs, when each card clears, the total interest, what to cut to close a gap, and how the same debts go at the money they actually have. Use it for any "can I pay off", "how long to clear", "make me a plan" question.
 - get_my_setup: what the person told the app: their cash cushion, scheduled payments (tuition and the like), expected one-off income, homes, cars and leases they added, loans, their goals, which employers pay them, and bills they added by hand. Use for questions about their plan, goals, leases, the cushion, or anything they set up in MyFinance.
 - get_net_worth_trend: how net worth has changed over time. Use for whether it is going up, how it changed over a period, or progress.
@@ -66,6 +67,7 @@ Rules:
 - After make_payoff_plan, NEVER read the table out or list the months. Give the headline in two or three short sentences: whether it is doable, how much a month, when it finishes (and if not doable, the gap and the one or two biggest things that would close it, or how long it takes at the money they have). Then ask exactly: "I've made the full plan. Shall I open it so you can read it, or save it to your files?" The app shows Open and Save buttons for it.
 - When they reply "open it", "show me", "save it" or similar to that question, the app does it; you will not be asked.
 - If a month-by-month figure is asked for later, give that one figure, not the table.
+- Credit scores: NEVER say you cannot see their score; call get_credit_score. Lead with the newest score, where it came from and how old it is. FICO and VantageScore differ by design, so compare a score only with the same model. If none is saved, or the newest is over 30 days old, say they can say "update my credit score from Citi" (or Amex, Bank of America, Chase, Credit Karma) and MyFinance will read it from the site for them.
 - You can only ever see THIS person's data. If they ask about someone else's finances, say you can only look at their own accounts.
 - Never invent a number, transaction, or date. If a tool returns nothing, say so plainly.
 - Keep answers short. Lead with the direct answer. Use a few bullets only when listing. Do not dump every field; the app shows matching transactions beneath your answer.
@@ -152,6 +154,11 @@ const TOOLS = [
         days: { type: 'integer', description: 'How many days ahead to look, 1 to 90. Default 14.' },
       },
     },
+  },
+  {
+    name: 'get_credit_score',
+    description: "Read the credit scores saved in MyFinance: each reading's score, band, scoring model (FICO, FICO Bankcard, VantageScore), bureau, the provider it was read from (Citi, American Express and so on), its date and age in days, the change since the previous reading of the same model, plus card utilisation now. Use for any question about their credit score.",
+    input_schema: { type: 'object', properties: {} },
   },
   {
     name: 'make_payoff_plan',
@@ -687,6 +694,37 @@ async function runPayoffPlan(user, input) {
   return {
     forModel: { ...summary, schedule_months: schedule.length, first_month: schedule[0] || null, note: 'The full month-by-month schedule has been sent to the app. Do not read it out.' },
     plan,
+  };
+}
+
+/// The credit scores the person saved in MyFinance (typed in, or read off a provider's page).
+async function runCreditScore(user) {
+  const { loadPrefs, fromSwift } = await import('../lib/moneymap.js');
+  const p = await loadPrefs(user);
+  const list = (Array.isArray(p.creditScores) ? p.creditScores : [])
+    .map((x) => ({ score: Number(x.score), source: x.source || null, model: x.model || null, bureau: x.bureau || null, provider: x.provider || null, date: fromSwift(x.date), utilisation_then: x.utilisationAtTime ?? null }))
+    .filter((x) => Number.isFinite(x.score) && x.date)
+    .sort((a, b) => (a.date < b.date ? 1 : -1));
+  const band = (n) => (n < 580 ? 'Poor' : n < 670 ? 'Fair' : n < 740 ? 'Good' : n < 800 ? 'Very good' : 'Exceptional');
+  const today = Date.now();
+  const readings = list.slice(0, 20).map((x, i) => {
+    const prev = list.slice(i + 1).find((y) => (y.model || y.source) === (x.model || x.source));
+    return { ...x, band: band(x.score), age_days: Math.round((today - new Date(x.date).getTime()) / 864e5), change_since_previous_same_model: prev ? x.score - prev.score : null };
+  });
+  let utilisation = null;
+  try {
+    const { rows } = await latestSnapshots(user);
+    let owed = 0, limit = 0;
+    for (const a of rows) if (a.type === 'credit' && a.limit != null) { owed += Number(a.current) || 0; limit += Number(a.limit) || 0; }
+    if (limit > 0) utilisation = Math.round((owed / limit) * 1000) / 10;
+  } catch {}
+  return {
+    count: readings.length,
+    newest: readings[0] || null,
+    readings,
+    card_utilisation_now_percent: utilisation,
+    how_to_update: 'Say "update my credit score from Citi" (or Amex, Bank of America, Chase, Credit Karma): MyFinance opens the site, the person signs in, and it reads the score.',
+    note: readings.length ? null : 'No credit score is saved in MyFinance yet.',
   };
 }
 
@@ -1387,6 +1425,12 @@ export default async function handler(req, res) {
               results.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(bills) });
             } catch (err) {
               results.push({ type: 'tool_result', tool_use_id: block.id, content: `bills failed: ${err.message}`, is_error: true });
+            }
+          } else if (block.name === 'get_credit_score') {
+            try {
+              results.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(await runCreditScore(user)) });
+            } catch (err) {
+              results.push({ type: 'tool_result', tool_use_id: block.id, content: `credit score failed: ${err.message}`, is_error: true });
             }
           } else if (block.name === 'make_payoff_plan') {
             try {
