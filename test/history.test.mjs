@@ -25,4 +25,30 @@ ok('thin keeps recent rows and only month starts and Mondays before', () => {
     row('2026-01-07', 'depository', 1)];                        // Wednesday: dropped
   assert.deepEqual(thin(rows, now).map((r) => r.as_of), ['2026-06-20', '2026-01-01', '2026-01-05']);
 });
+ok('an account missing for a day is carried at its last balance, not zero, and the day is marked', () => {
+  const r = (as_of, id, type, current) => ({ as_of, account_id: id, institution: 'Bank', name: id, type, current });
+  const t = rollup([r('2026-03-10', 'ira', 'investment', 100000), r('2026-03-10', 'chk', 'depository', 5000),
+    r('2026-03-11', 'chk', 'depository', 4800),
+    r('2026-03-12', 'ira', 'investment', 101000), r('2026-03-12', 'chk', 'depository', 4700)]);
+  const d11 = t.find((d) => d.as_of === '2026-03-11');
+  assert.equal(d11.net, 104800); assert.equal(d11.filled, 1);
+  assert.equal(t.find((d) => d.as_of === '2026-03-10').filled, 0);
+});
+ok('a bank re-linked under new ids is bridged by bank, name and type', () => {
+  const r = (as_of, id, current) => ({ as_of, account_id: id, institution: 'Broker', name: 'IRA', type: 'investment', current });
+  const c = (as_of) => ({ as_of, account_id: 'chk', institution: 'Bank', name: 'Checking', type: 'depository', current: 1000 });
+  const t = rollup([r('2026-03-10', 'old', 50000), c('2026-03-10'), c('2026-03-11'), c('2026-03-12'), r('2026-03-13', 'new', 50500), c('2026-03-13')]);
+  assert.equal(t.find((d) => d.as_of === '2026-03-11').net, 51000);
+  assert.equal(t.find((d) => d.as_of === '2026-03-12').filled, 1);
+});
+ok('a real fall in a balance that reported is kept', () => {
+  const r = (as_of, current) => ({ as_of, account_id: 'brk', institution: 'B', name: 'Brokerage', type: 'investment', current });
+  const t = rollup([r('2026-10-01', 20000), r('2026-10-02', 12000), r('2026-10-03', 12500)]);
+  assert.equal(t[1].net, 12000); assert.equal(t[1].filled, 0);
+});
+ok('an account that stopped for good is not carried forward', () => {
+  const r = (as_of, id, current) => ({ as_of, account_id: id, institution: 'B', name: id, type: 'depository', current });
+  const t = rollup([r('2026-10-01', 'a', 100), r('2026-10-01', 'b', 50), r('2026-10-02', 'a', 100), r('2026-10-03', 'a', 100)]);
+  assert.equal(t[2].net, 100); assert.equal(t[2].filled, 0);
+});
 console.log(`${n} passed`);
